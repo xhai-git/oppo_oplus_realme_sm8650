@@ -1,4 +1,4 @@
-name: 获取原版内核 .config 和 Module.symvers
+name: 获取 6.1.141 内核 .config 和 Module.symvers
 
 env:
   TZ: Asia/Shanghai
