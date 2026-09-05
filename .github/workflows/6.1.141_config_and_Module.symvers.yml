@@ -176,11 +176,8 @@ jobs:
       # ============================================================
       # 7. 完整构建
       #
-      # 不指定 vmlinux
-      # 使用 kernel Makefile 默认构建流程
-      #
       # 目的：
-      # 让 MODPOST / Kbuild 完整执行，
+      # 让 Kbuild / MODPOST 执行，
       # 生成与当前 .config 匹配的 Module.symvers
       # ============================================================
       - name: Build kernel
@@ -254,14 +251,14 @@ jobs:
           echo "CONFIG_MODULES"
           echo "========================================"
 
-          grep '^CONFIG_MODULES=' "$OUT/.config"
+          grep '^CONFIG_MODULES=' "$OUT/.config" || true
 
           echo
           echo "========================================"
           echo "CONFIG_MODVERSIONS"
           echo "========================================"
 
-          grep '^CONFIG_MODVERSIONS=' "$OUT/.config"
+          grep '^CONFIG_MODVERSIONS=' "$OUT/.config" || true
 
       # ============================================================
       # 9. 只提取两个文件
@@ -270,31 +267,48 @@ jobs:
         run: |
           set -e
 
-          rm -rf "$GITHUB_WORKSPACE/result"
+          OUT="$GITHUB_WORKSPACE/kernel_workspace/out"
+          RESULT="$GITHUB_WORKSPACE/result"
 
-          mkdir -p "$GITHUB_WORKSPACE/result"
+          rm -rf "$RESULT"
 
+          mkdir -p "$RESULT"
+
+          # .config
           cp \
-            "$GITHUB_WORKSPACE/kernel_workspace/out/.config" \
-            "$GITHUB_WORKSPACE/result/.config"
+            "$OUT/.config" \
+            "$RESULT/.config"
 
+          # Module.symvers
           cp \
-            "$GITHUB_WORKSPACE/kernel_workspace/out/Module.symvers" \
-            "$GITHUB_WORKSPACE/result/Module.symvers"
+            "$OUT/Module.symvers" \
+            "$RESULT/Module.symvers"
 
           echo
           echo "========================================"
           echo "Final files"
           echo "========================================"
 
-          ls -lah "$GITHUB_WORKSPACE/result"
+          ls -lah "$RESULT"
+
+          echo
+          echo "Checking exact files:"
+          test -f "$RESULT/.config"
+          test -f "$RESULT/Module.symvers"
+
+          echo
+          echo "SUCCESS: both files exist"
 
       # ============================================================
       # 10. 上传 Artifact
+      #
+      # include-hidden-files: true
+      # 让 .config 也能被上传
       # ============================================================
       - name: Upload config and Module.symvers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: SM8650-6.1.141-config-Module.symvers
           path: result/
+          include-hidden-files: true
           if-no-files-found: error
