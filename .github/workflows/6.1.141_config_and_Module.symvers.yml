@@ -1,4 +1,4 @@
-name: Build SM8650 6.1.141 config and Module.symvers
+name: Build SM8650 6.1.141 - config and Module.symvers
 
 on:
   workflow_dispatch:
@@ -8,9 +8,16 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+
+      # ============================================================
+      # 1. 安装编译依赖
+      # ============================================================
       - name: Install dependencies
         run: |
+          set -e
+
           sudo apt-get update
+
           sudo apt-get install -y \
             git \
             wget \
@@ -28,10 +35,16 @@ jobs:
             rsync \
             dwarves
 
+      # ============================================================
+      # 2. 下载原始 SM8650 6.1.141 内核源码
+      # ============================================================
       - name: Download kernel source
         run: |
-          mkdir -p kernel_workspace
-          cd kernel_workspace
+          set -e
+
+          mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           wget -O kernel.zip \
             "https://github.com/cctv18/android_kernel_common_oneplus_sm8650/archive/refs/heads/oneplus/sm8650_b_16.0.0_oneplus12_6.1.141.zip"
@@ -43,33 +56,49 @@ jobs:
             | head -n 1)
 
           if [ -z "$SRC_DIR" ]; then
-            echo "找不到内核源码目录"
+            echo "ERROR: Kernel source directory not found"
             exit 1
           fi
 
           mv "$SRC_DIR" common
 
+          echo "Kernel source:"
+          ls -la common | head
+
+      # ============================================================
+      # 3. 下载原始 LLVM/Clang 20
+      # ============================================================
       - name: Download LLVM Clang 20
         run: |
-          cd kernel_workspace
+          set -e
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           wget -O clang.zip \
             "https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip"
 
           mkdir -p clang20
+
           unzip -q clang.zip -d clang20
 
-          echo "搜索 clang..."
+          echo "Searching for clang..."
 
-          CLANG_BIN=$(find "$GITHUB_WORKSPACE/kernel_workspace/clang20" \
+          CLANG_BIN=$(find \
+            "$GITHUB_WORKSPACE/kernel_workspace/clang20" \
             -type f \
             -path '*/bin/clang' \
             | head -n 1)
 
           if [ -z "$CLANG_BIN" ]; then
-            echo "错误：找不到 clang"
-            find "$GITHUB_WORKSPACE/kernel_workspace/clang20" \
-              -maxdepth 5 -type f | head -100
+            echo "ERROR: clang not found"
+
+            echo "clang20 directory:"
+            find \
+              "$GITHUB_WORKSPACE/kernel_workspace/clang20" \
+              -maxdepth 5 \
+              -type f \
+              | head -100
+
             exit 1
           fi
 
@@ -82,6 +111,25 @@ jobs:
 
           "$CLANG_BIN" --version
 
+      # ============================================================
+      # 4. 创建输出目录
+      # ============================================================
+      - name: Create output directory
+        run: |
+          set -e
+
+          mkdir -p \
+            "$GITHUB_WORKSPACE/kernel_workspace/out"
+
+      # ============================================================
+      # 5. 使用原始 gki_defconfig
+      #
+      # 不修改 defconfig
+      # 不添加 KSU
+      # 不添加 SUSFS
+      # 不添加 KPM
+      # 不添加任何第三方配置
+      # ============================================================
       - name: Generate original GKI config
         working-directory: kernel_workspace/common
         run: |
@@ -94,14 +142,26 @@ jobs:
             gki_defconfig
 
           echo
-          echo "===== CONFIG CHECK ====="
+          echo "========================================"
+          echo "CONFIG generated"
+          echo "========================================"
 
+          ls -lh \
+            "$GITHUB_WORKSPACE/kernel_workspace/out/.config"
+
+          echo
+          echo "CONFIG_MODULES:"
           grep '^CONFIG_MODULES=' \
-            "$GITHUB_WORKSPACE/kernel_workspace/out/.config"
+            "$GITHUB_WORKSPACE/kernel_workspace/out/.config" || true
 
+          echo
+          echo "CONFIG_MODVERSIONS:"
           grep '^CONFIG_MODVERSIONS=' \
-            "$GITHUB_WORKSPACE/kernel_workspace/out/.config"
+            "$GITHUB_WORKSPACE/kernel_workspace/out/.config" || true
 
+      # ============================================================
+      # 6. modules_prepare
+      # ============================================================
       - name: Prepare kernel
         working-directory: kernel_workspace/common
         run: |
@@ -113,7 +173,17 @@ jobs:
             ARCH=arm64 \
             modules_prepare
 
-      - name: Build kernel for Module.symvers
+      # ============================================================
+      # 7. 完整构建
+      #
+      # 不指定 vmlinux
+      # 使用 kernel Makefile 默认构建流程
+      #
+      # 目的：
+      # 让 MODPOST / Kbuild 完整执行，
+      # 生成与当前 .config 匹配的 Module.symvers
+      # ============================================================
+      - name: Build kernel
         working-directory: kernel_workspace/common
         run: |
           set -e
@@ -122,54 +192,109 @@ jobs:
             O="$GITHUB_WORKSPACE/kernel_workspace/out" \
             LLVM=1 \
             ARCH=arm64 \
-            KCFLAGS="-Wno-error" \
-            vmlinux
+            KCFLAGS="-Wno-error"
 
+      # ============================================================
+      # 8. 检查两个文件
+      # ============================================================
       - name: Verify output
         run: |
           set -e
 
           OUT="$GITHUB_WORKSPACE/kernel_workspace/out"
 
-          echo "===== .config ====="
+          echo
+          echo "========================================"
+          echo "Checking .config"
+          echo "========================================"
+
+          if [ ! -f "$OUT/.config" ]; then
+            echo "ERROR: .config not found"
+            exit 1
+          fi
+
           ls -lh "$OUT/.config"
 
           echo
-          echo "===== Module.symvers ====="
+          echo "========================================"
+          echo "Checking Module.symvers"
+          echo "========================================"
+
+          if [ ! -f "$OUT/Module.symvers" ]; then
+            echo "ERROR: Module.symvers not found"
+
+            echo
+            echo "Searching for Module.symvers:"
+            find "$GITHUB_WORKSPACE/kernel_workspace" \
+              -name Module.symvers \
+              -type f \
+              -print
+
+            exit 1
+          fi
+
           ls -lh "$OUT/Module.symvers"
 
           echo
-          echo "===== Module.symvers lines ====="
+          echo "========================================"
+          echo "Module.symvers line count"
+          echo "========================================"
+
           wc -l "$OUT/Module.symvers"
 
           echo
-          echo "===== CONFIG ====="
-          grep -E \
-            '^(CONFIG_MODULES|CONFIG_MODVERSIONS)=' \
-            "$OUT/.config"
+          echo "========================================"
+          echo "First 10 symbols"
+          echo "========================================"
 
-          echo
-          echo "===== FIRST SYMBOLS ====="
           head -10 "$OUT/Module.symvers"
 
+          echo
+          echo "========================================"
+          echo "CONFIG_MODULES"
+          echo "========================================"
+
+          grep '^CONFIG_MODULES=' "$OUT/.config"
+
+          echo
+          echo "========================================"
+          echo "CONFIG_MODVERSIONS"
+          echo "========================================"
+
+          grep '^CONFIG_MODVERSIONS=' "$OUT/.config"
+
+      # ============================================================
+      # 9. 只提取两个文件
+      # ============================================================
       - name: Collect files
         run: |
           set -e
 
-          mkdir -p result
+          rm -rf "$GITHUB_WORKSPACE/result"
+
+          mkdir -p "$GITHUB_WORKSPACE/result"
 
           cp \
             "$GITHUB_WORKSPACE/kernel_workspace/out/.config" \
-            result/.config
+            "$GITHUB_WORKSPACE/result/.config"
 
           cp \
             "$GITHUB_WORKSPACE/kernel_workspace/out/Module.symvers" \
-            result/Module.symvers
+            "$GITHUB_WORKSPACE/result/Module.symvers"
 
-          ls -lh result
+          echo
+          echo "========================================"
+          echo "Final files"
+          echo "========================================"
 
-      - name: Upload .config and Module.symvers
+          ls -lah "$GITHUB_WORKSPACE/result"
+
+      # ============================================================
+      # 10. 上传 Artifact
+      # ============================================================
+      - name: Upload config and Module.symvers
         uses: actions/upload-artifact@v4
         with:
           name: SM8650-6.1.141-config-Module.symvers
           path: result/
+          if-no-files-found: error
