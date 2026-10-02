@@ -1,4 +1,4 @@
-name: 6.1.141 内核源码完整下载
+name: 6.1.141 内核源码下载
 
 env:
   TZ: Asia/Shanghai
@@ -93,7 +93,7 @@ on:
         default: true
 
       kernel_suffix:
-        description: '内核后缀(留空默认使用原Action中的KERNEL_NAME)'
+        description: '内核后缀(留空默认使用 KERNEL_NAME)'
         required: false
         type: string
         default: ''
@@ -159,7 +159,6 @@ jobs:
 
           mv "$SRC_DIR" common
 
-          # 基础完整性检查
           test -f common/Makefile
           test -f common/Kconfig
           test -f common/arch/arm64/Kconfig
@@ -198,7 +197,6 @@ jobs:
           fi
 
           echo "KERNEL_SHA=$KERNEL_SHA" >> "$GITHUB_ENV"
-
           echo "源码提交：$KERNEL_SHA"
 
       - name: 配置 KernelSU
@@ -333,26 +331,35 @@ jobs:
           curl -fL \
             --retry 5 \
             "$RAW_BASE/zram_patch/lz4armv8.S" \
-            -o common/lib/lz4armv8.S
+            -o assets/zram/lz4armv8.S
 
           curl -fL \
             --retry 5 \
             "$RAW_BASE/zram_patch/002-zstd.patch" \
             -o assets/zram/002-zstd.patch
 
+          # 001-lz4.patch 包含 lz4armv8.S 的 binary diff。
+          # 先按最终源码要求放入目标位置，再排除该 binary diff。
+          mkdir -p common/lib/lz4/lz4armv8
+
+          cp \
+            assets/zram/lz4armv8.S \
+            common/lib/lz4/lz4armv8/lz4armv8.S
+
           cd common
 
-          patch \
+          git apply \
+            --exclude='lib/lz4/lz4armv8/lz4armv8.S' \
             -p1 \
-            --forward \
-            --batch \
-            < ../assets/zram/001-lz4.patch
+            ../assets/zram/001-lz4.patch
 
-          patch \
+          git apply \
             -p1 \
-            --forward \
-            --batch \
-            < ../assets/zram/002-zstd.patch
+            ../assets/zram/002-zstd.patch
+
+          test -f lib/lz4/lz4armv8/lz4armv8.S
+
+          echo "LZ4 1.10.0 + Zstd 1.5.7 应用完成。"
 
       - name: 应用 LZ4KD
         if: inputs.lz4kd_enable
@@ -361,6 +368,8 @@ jobs:
           set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          mkdir -p assets
 
           if [ ! -d SukiSU_patch ]; then
             git clone \
@@ -414,18 +423,16 @@ jobs:
             printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
           }
 
-          # KernelSU
           if [ "${{ inputs.ksu_type }}" != "none" ]; then
             set_config CONFIG_KSU y
           else
             set_config CONFIG_KSU n
           fi
 
-          # SUSFS
           if \
             [ "${{ inputs.susfs_enable }}" = "true" ] &&
-            [ "${{ inputs.ksu_type }}" != "none" ]; then
-
+            [ "${{ inputs.ksu_type }}" != "none" ]
+          then
             set_config CONFIG_KSU_SUSFS y
             set_config CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT y
             set_config CONFIG_KSU_SUSFS_SUS_PATH y
@@ -445,11 +452,9 @@ jobs:
             set_config CONFIG_KSU_SUSFS n
           fi
 
-          # Mountify / 挂载能力
           set_config CONFIG_TMPFS_XATTR y
           set_config CONFIG_TMPFS_POSIX_ACL y
 
-          # LZ4KD
           if [ "${{ inputs.lz4kd_enable }}" = "true" ]; then
             set_config CONFIG_ZSMALLOC y
             set_config CONFIG_CRYPTO_LZ4HC y
@@ -458,11 +463,9 @@ jobs:
             set_config CONFIG_CRYPTO_842 y
           fi
 
-          # 保留原Action的优化配置
           set_config CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE y
           set_config CONFIG_HEADERS_INSTALL n
 
-          # 保留原Action行为
           sed -i 's/check_defconfig//' common/build.config.gki
 
       - name: 配置 BBR / 拥塞控制算法
@@ -773,7 +776,7 @@ jobs:
 
           echo 'CONFIG_BBG=n' >> "$DEFCONFIG"
 
-      - name: 应用原Action的基础CVE补丁
+      - name: 应用基础CVE补丁
         shell: bash
         run: |
           set -euo pipefail
@@ -819,7 +822,6 @@ jobs:
             printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
           }
 
-          # KPatch-Next工作在已编译的arm64内核Image上。
           set_config CONFIG_KALLSYMS y
           set_config CONFIG_KALLSYMS_ALL y
 
@@ -863,6 +865,8 @@ jobs:
 
           RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
 
+          mkdir -p assets
+
           curl -fL \
             --retry 5 \
             "$RAW_BASE/other_patch/apk_sign.patch" \
@@ -877,30 +881,25 @@ jobs:
             --batch \
             < ../../../assets/apk_sign.patch
 
-      - name: 清理临时补丁文件并保留组件源码
+      - name: 清理补丁仓库与构建缓存，保留完整源码
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          # 临时补丁仓库不是最终内核源码本体
           rm -rf \
             susfs4ksu \
             SukiSU_patch \
             assets
 
-          # KernelSU / ReSukiSU / KernelSU Next：
-          # common/drivers/kernelsu 是指向这些目录的软链接，
-          # 所以源码目录必须保留。
-          #
-          # 仅删除Git历史，避免把整个组件仓库历史一起打进源码包。
+          # KernelSU/ReSukiSU 与 KernelSU Next 的 kernelsu 目录由软链接指向这些目录，
+          # 因此对应源码目录必须保留。
           rm -rf KernelSU/.git
           rm -rf KernelSU-Next/.git
 
           rm -f common/69_hide_stuff.patch
           rm -f common/50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch
-
           rm -f KernelSU/10_enable_susfs_for_ksu.patch
 
           rm -rf common/out
@@ -941,17 +940,17 @@ jobs:
           OUT_DIR="${OUT_DIR:-$ROOT_DIR/out}"
           JOBS="${JOBS:-$(nproc)}"
 
-          # 不在这里下载任何工具链。
+          # 不下载任何工具链。
           #
-          # 例如：
+          # 使用：
           #   LLVM=/path/to/clang/bin/ ./build_local.sh
           #
           # 或：
           #   export LLVM=/path/to/clang/bin/
           #   ./build_local.sh
           #
-          # LLVM为空时，直接使用PATH中的LLVM工具。
-
+          # LLVM 目录应包含 clang / ld.lld / llvm-ar / llvm-nm /
+          # llvm-objcopy 等工具。
           if [ -n "${LLVM:-}" ]; then
             case "$LLVM" in
               */)
@@ -965,11 +964,6 @@ jobs:
           fi
 
           export ARCH="${ARCH:-arm64}"
-
-          # LLVM=1 时一般不需要GNU交叉工具链；
-          # 如果本地环境需要，可自行设置：
-          #
-          #   CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE="${CROSS_COMPILE:-}"
 
           cd "$ROOT_DIR"
@@ -1034,16 +1028,16 @@ jobs:
 
           Selected components
           -------------------
-          KernelSU       : ${SELECTED_KSU}
-          SUSFS          : ${SELECTED_SUSFS}
-          KPM symbols    : ${SELECTED_KPM}
-          LZ4+Zstd       : ${SELECTED_LZ4}
-          LZ4KD          : ${SELECTED_LZ4KD}
-          BBR mode       : ${SELECTED_BBR}
-          Droidspaces    : ${SELECTED_DROIDSPACES}
-          Better Net     : ${SELECTED_NET}
+          KernelSU        : ${SELECTED_KSU}
+          SUSFS           : ${SELECTED_SUSFS}
+          KPM symbols     : ${SELECTED_KPM}
+          LZ4+Zstd        : ${SELECTED_LZ4}
+          LZ4KD           : ${SELECTED_LZ4KD}
+          BBR mode        : ${SELECTED_BBR}
+          Droidspaces     : ${SELECTED_DROIDSPACES}
+          Better Net      : ${SELECTED_NET}
           SSG             : ${SELECTED_SSG}
-          Re-Kernel      : ${SELECTED_REKERNEL}
+          Re-Kernel       : ${SELECTED_REKERNEL}
           Baseband Guard  : ${SELECTED_BBG}
           Local version   : ${SELECTED_SUFFIX:-$KERNEL_NAME}
 
@@ -1056,8 +1050,9 @@ jobs:
 
           Build
           -----
-          This package contains the complete kernel source tree used by the
-          original Action's make ... ARCH=arm64 ... Image build path.
+          This package contains the complete kernel source tree and the
+          selected component source/configuration changes needed for local
+          arm64 builds.
 
           Run:
               ./build_local.sh
@@ -1067,8 +1062,9 @@ jobs:
 
           KPM note
           --------
-          The original Action applies KPM after the kernel Image is compiled.
-          This source package therefore does not embed KPatch-Next binaries.
+          KPM is applied to the compiled kernel Image rather than to the
+          source tree. This source package therefore does not embed KPatch-Next
+          binaries.
 
           When KPM is enabled:
               CONFIG_KALLSYMS=y
@@ -1123,9 +1119,6 @@ jobs:
 
           ARCHIVE="android_kernel_common_sm8650_${KERNEL_VERSION}.${SUB_VERSION}_${suffix}.tar.zst"
 
-          # 不包含common目录的Git历史。
-          # 但KernelSU/ReSukiSU/KernelSU Next的实际源码会保留，
-          # 以保证common/drivers/kernelsu软链接有效。
           tar \
             --zstd \
             -cf "$ARCHIVE" \
