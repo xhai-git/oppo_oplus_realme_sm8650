@@ -1,4 +1,4 @@
-name: 6.1.141 内核源码下载并编译验证
+name: 6.1.141 内核源码下载
 
 env:
   TZ: Asia/Shanghai
@@ -9,28 +9,15 @@ env:
   KERNEL_REPO: 'cctv18/android_kernel_common_oneplus_sm8650'
   KERNEL_BRANCH: 'oneplus/sm8650_b_16.0.0_oneplus12_6.1.141'
 
-  KSU_TYPE: 'none'
-  SUSFS_ENABLE: 'false'
-  KPM_ENABLE: 'false'
-  LZ4_ENABLE: 'true'
-  LZ4KD_ENABLE: 'false'
-  BBR_ENABLE: 'false'
-  DROIDSPACES_ENABLE: 'false'
-  BETTER_NET_ENABLE: 'false'
-  SSG_ENABLE: 'true'
-  REKERNEL_ENABLE: 'false'
-  BASEBAND_GUARD_ENABLE: 'true'
-  KERNEL_SUFFIX: ''
-
 on:
   workflow_dispatch:
 
 jobs:
-  source:
-    runs-on: ubuntu-26.04
+  build:
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 180
+    timeout-minutes: 90
 
     steps:
       - name: 安装编译依赖
@@ -42,106 +29,121 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc \
             bison \
-            cpio \
+            build-essential \
             flex \
-            git \
             libelf-dev \
             libssl-dev \
-            lz4 \
+            libdw-dev \
+            dwarves \
             python3 \
             rsync \
-            zstd \
-            dwarves
+            cpio \
+            kmod \
+            zstd
 
-      - name: 准备LLVM 20
+      - name: 检查本机 Clang 20
         shell: bash
         run: |
           set -euo pipefail
 
-          if ! command -v clang-20 >/dev/null 2>&1; then
-            echo '错误：当前 GitHub Runner 没有 clang-20。'
-            clang --version || true
+          get_major() {
+            "$1" --version | sed -n '1s/^[^0-9]*\([0-9][0-9]*\).*/\1/p'
+          }
+
+          if command -v clang-20 >/dev/null 2>&1 && command -v ld.lld-20 >/dev/null 2>&1; then
+            LLVM_VALUE='-20'
+            CLANG_CMD="$(command -v clang-20)"
+            LLD_CMD="$(command -v ld.lld-20)"
+          elif command -v clang >/dev/null 2>&1 && [ "$(get_major clang)" = '20' ]; then
+            LLVM_VALUE='1'
+            CLANG_CMD="$(command -v clang)"
+            LLD_CMD="$(command -v ld.lld 2>/dev/null || true)"
+
+            if [ -z "$LLD_CMD" ]; then
+              echo "错误：Clang 20 存在，但 ld.lld 不存在。"
+              exit 1
+            fi
+          else
+            echo "错误：Runner 中没有可用的 Clang 20。"
+            echo "当前 clang："
+            clang --version 2>/dev/null || true
+            echo "当前 ld.lld："
+            ld.lld --version 2>/dev/null || true
             exit 1
           fi
 
-          LLVM20_BIN="$(dirname "$(readlink -f "$(command -v clang-20)")")"
+          echo "LLVM_VALUE=$LLVM_VALUE" >> "$GITHUB_ENV"
+          echo "CLANG_CMD=$CLANG_CMD" >> "$GITHUB_ENV"
+          echo "LLD_CMD=$LLD_CMD" >> "$GITHUB_ENV"
 
-          test -x "$LLVM20_BIN/clang"
-          test -x "$LLVM20_BIN/ld.lld"
-          test -x "$LLVM20_BIN/llvm-ar"
-          test -x "$LLVM20_BIN/llvm-nm"
-          test -x "$LLVM20_BIN/llvm-objcopy"
+          echo "Clang：$CLANG_CMD"
+          "$CLANG_CMD" --version | head -n 1
+          echo "LLD：$LLD_CMD"
+          "$LLD_CMD" --version | head -n 1
 
-          echo "LLVM20_BIN=$LLVM20_BIN" >> "$GITHUB_ENV"
-          echo "LLVM20_BIN=$LLVM20_BIN"
-          echo
-          "$LLVM20_BIN/clang" --version | head -n 2
-          "$LLVM20_BIN/ld.lld" --version | head -n 1
-
-      - name: 下载完整6.1.141内核源码
+      - name: 初始化工作目录
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$GITHUB_WORKSPACE"
-          rm -rf kernel_workspace
-          mkdir -p kernel_workspace
-          cd kernel_workspace
+          rm -rf "$GITHUB_WORKSPACE/kernel_workspace"
+          mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          echo "源码仓库：$KERNEL_REPO"
+          echo "源码分支：$KERNEL_BRANCH"
+          echo "内核版本：$KERNEL_VERSION.$SUB_VERSION"
+
+      - name: 下载 6.1.141 完整源码
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           SRC_URL="https://github.com/${KERNEL_REPO}/archive/refs/heads/${KERNEL_BRANCH}.tar.gz"
 
-          curl -fL \
-            --retry 5 \
-            --retry-delay 2 \
-            --connect-timeout 30 \
+          curl -fL --retry 5 --retry-delay 2 --connect-timeout 30 \
             "$SRC_URL" \
             -o kernel-source.tar.gz
 
           tar -xzf kernel-source.tar.gz
           rm -f kernel-source.tar.gz
 
-          SRC_DIR="$(find . -mindepth 1 -maxdepth 1 -type d \
-            -name 'android_kernel_common_oneplus_sm8650-*' -print -quit)"
+          SRC_DIR="$({
+            find . -mindepth 1 -maxdepth 1 -type d \
+              -name 'android_kernel_common_oneplus_sm8650-*' \
+              -print -quit
+          })"
 
-          test -n "$SRC_DIR"
+          [ -n "$SRC_DIR" ]
           mv "$SRC_DIR" common
 
           test -f common/Makefile
           test -f common/Kconfig
           test -f common/arch/arm64/Kconfig
           test -f common/arch/arm64/configs/gki_defconfig
-          test -d common/arch
           test -d common/drivers
-          test -d common/fs
-          test -d common/include
-          test -d common/init
-          test -d common/kernel
-          test -d common/lib
-          test -d common/mm
-          test -d common/net
           test -d common/security
+          test -d common/include
           test -d common/scripts
 
-          echo '完整内核源码基础检查通过。'
+          echo "6.1.141 源码基础检查通过。"
 
-      - name: 获取源码提交SHA
+      - name: 删除 ABI 保护并移除 dirty 后缀
         shell: bash
         run: |
           set -euo pipefail
 
-          KERNEL_SHA="$(
-            git ls-remote \
-              "https://github.com/${KERNEL_REPO}.git" \
-              "refs/heads/${KERNEL_BRANCH}" |
-            awk 'NR==1 {print $1}'
-          )"
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          test -n "$KERNEL_SHA"
-          echo "KERNEL_SHA=$KERNEL_SHA" >> "$GITHUB_ENV"
-          echo "源码提交: $KERNEL_SHA"
+          rm -f common/android/abi_gki_protected_exports_* || true
 
-      - name: 应用LZ4 1.10.0 + Zstd 1.5.7
-        if: env.LZ4_ENABLE == 'true'
+          if [ -f common/scripts/setlocalversion ]; then
+            sed -i 's/ -dirty//g' common/scripts/setlocalversion
+          fi
+
+      - name: 配置 LZ4 1.10.0 + Zstd 1.5.7
         shell: bash
         run: |
           set -euo pipefail
@@ -163,9 +165,8 @@ jobs:
             "$RAW_BASE/zram_patch/002-zstd.patch" \
             -o assets/zram/002-zstd.patch
 
-          # 001-lz4.patch 含有 lz4armv8.S 的 binary diff。
-          # 先按补丁最终目录手工放置该文件，再让 git apply 排除 binary diff。
-          rm -rf common/lib/lz4/lz4armv8
+          # 001-lz4.patch 包含 lz4armv8.S 的 binary diff。
+          # 先放置实际二进制源码文件，再让 git apply 排除这个 binary diff。
           mkdir -p common/lib/lz4/lz4armv8
           cp assets/zram/lz4armv8.S common/lib/lz4/lz4armv8/lz4armv8.S
 
@@ -176,21 +177,23 @@ jobs:
             --exclude='lib/lz4/lz4armv8/lz4armv8.S' \
             ../assets/zram/001-lz4.patch
 
-          git apply \
+          patch \
             -p1 \
-            ../assets/zram/002-zstd.patch
+            --forward \
+            --batch \
+            < ../assets/zram/002-zstd.patch
 
           test -f lib/lz4/lz4armv8/lz4armv8.S
 
-          echo 'LZ4 + Zstd 补丁应用完成。'
+          echo "LZ4 + Zstd 补丁应用完成。"
 
-      - name: 启用SSG IO调度器
-        if: env.SSG_ENABLE == 'true'
+      - name: 配置三星 SSG IO 调度器
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
+
           DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
 
           set_config() {
@@ -207,213 +210,150 @@ jobs:
           set_config CONFIG_MQ_IOSCHED_SSG y
           set_config CONFIG_MQ_IOSCHED_SSG_CGROUP y
 
-      - name: 集成Baseband Guard
-        if: env.BASEBAND_GUARD_ENABLE == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          git clone --depth=1 \
-            https://github.com/cctv18/Baseband-guard.git \
-            Baseband-guard
-
-          test -f Baseband-guard/Kconfig
-          test -f Baseband-guard/Makefile
-          test -f Baseband-guard/baseband_guard.c
-
-          SECURITY_DIR="common/security"
-          BBG_SRC="$PWD/Baseband-guard"
-          BBG_DST="$SECURITY_DIR/baseband-guard"
-
-          # 将 Baseband Guard 直接集成到 common/security，最终源码包不依赖包外软链接。
-          if ! grep -Fqx 'obj-$(CONFIG_BBG) += baseband-guard/' "$SECURITY_DIR/Makefile"; then
-            printf '\nobj-$(CONFIG_BBG) += baseband-guard/\n' >> "$SECURITY_DIR/Makefile"
-          fi
-
-          # 直接插入合法的 Kconfig source 语句。
-          # 不使用 awk 的多层引号转义，避免生成 source \"...\" 这类非法内容。
-          if ! grep -Fqx 'source "security/baseband-guard/Kconfig"' "$SECURITY_DIR/Kconfig"; then
-            sed -i '/^endmenu[[:space:]]*$/i source "security/baseband-guard/Kconfig"' "$SECURITY_DIR/Kconfig"
-          fi
-
-          test "$(grep -Fxc 'source "security/baseband-guard/Kconfig"' "$SECURITY_DIR/Kconfig")" -eq 1
-
-          # 复制完整 Baseband Guard 源码到最终源码树内部。
-          rm -rf "$BBG_DST"
-          mkdir -p "$BBG_DST"
-          cp -a "$BBG_SRC"/. "$BBG_DST"/
-          rm -rf "$BBG_DST/.git"
-
-          # modern LSM / GKI 直接在默认 LSM 列表中加入 baseband_guard。
-          sed -i \
-            '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' \
-            "$SECURITY_DIR/Kconfig"
-
-          rm -rf Baseband-guard
-
-          DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
-
-          set_config() {
-            local key="$1"
-            local value="$2"
-
-            sed -i -E \
-              "/^${key}=.*/d;/^# ${key} is not set$/d" \
-              "$DEFCONFIG"
-
-            printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
-          }
-
-          set_config CONFIG_BBG y
-
-          test -d common/security/baseband-guard
-          test -f common/security/baseband-guard/Kconfig
-          test -f common/security/baseband-guard/Makefile
-          test -f common/security/baseband-guard/baseband_guard.c
-          grep -q 'security/baseband-guard/Kconfig' common/security/Kconfig
-          grep -q 'obj-$(CONFIG_BBG) += baseband-guard/' common/security/Makefile
-
-          echo 'Baseband Guard 集成完成。'
-
-      - name: 固定内核配置
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-          DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
-
-          set_config() {
-            local key="$1"
-            local value="$2"
-
-            sed -i -E \
-              "/^${key}=.*/d;/^# ${key} is not set$/d" \
-              "$DEFCONFIG"
-
-            printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
-          }
-
-          # KernelSU：关闭，不下载/注入任何KSU源码
-          set_config CONFIG_KSU n
-          set_config CONFIG_KSU_SUSFS n
-
-          # KPM：关闭
-          # 不添加 KPM 特有配置。
-
-          # LZ4KD：关闭
-          set_config CONFIG_CRYPTO_LZ4K n
-          set_config CONFIG_CRYPTO_LZ4KD n
-
-          # BBR / Better Net / Droidspaces / Re-Kernel：关闭
-          # 不添加对应功能配置。
-
-          # SSG：固定开启
-          set_config CONFIG_MQ_IOSCHED_SSG y
-          set_config CONFIG_MQ_IOSCHED_SSG_CGROUP y
-
-          # Baseband Guard：固定开启
-          set_config CONFIG_BBG y
-
-          # 已使用的通用配置
-          set_config CONFIG_TMPFS_XATTR y
-          set_config CONFIG_TMPFS_POSIX_ACL y
-          set_config CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE y
-          set_config CONFIG_HEADERS_INSTALL n
-
-          sed -i 's/check_defconfig//' common/build.config.gki
-
-          # 固定版本后缀
-          set_config CONFIG_LOCALVERSION '"-'"$KERNEL_NAME"'"'
-
-      - name: 最终源码树检查
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          test ! -e common/drivers/kernelsu
-          test ! -d KernelSU
-          test ! -d KernelSU-Next
-
-          if [ "$LZ4_ENABLE" = 'true' ]; then
-            test -f common/lib/lz4/lz4armv8/lz4armv8.S
-          fi
-
-          if [ "$BASEBAND_GUARD_ENABLE" = 'true' ]; then
-            test -d common/security/baseband-guard
-            test -f common/security/baseband-guard/Kconfig
-            test -f common/security/baseband-guard/baseband_guard.c
-          fi
-
-          while IFS= read -r -d '' link; do
-            target="$(readlink "$link")"
-            resolved="$(realpath -m "$(dirname "$link")/$target")"
-
-            case "$resolved" in
-              "$GITHUB_WORKSPACE/kernel_workspace/common"/*)
-                ;;
-              *)
-                echo "错误：common中发现指向源码树外部的软链接：$link -> $target"
-                exit 1
-                ;;
-            esac
-          done < <(find common -type l -print0)
-
-          echo '最终源码树检查通过。'
-
-      - name: 生成最终Kconfig
+      - name: 配置 Baseband Guard
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace/common"
-          export PATH="$LLVM20_BIN:$PATH"
+
+          curl -fsSL \
+            https://raw.githubusercontent.com/cctv18/Baseband-guard/master/setup.sh \
+            -o /tmp/baseband-guard-setup.sh
+
+          chmod +x /tmp/baseband-guard-setup.sh
+          /tmp/baseband-guard-setup.sh
+
+          DEFCONFIG="arch/arm64/configs/gki_defconfig"
+
+          sed -i -E \
+            '/^CONFIG_BBG=.*/d;/^# CONFIG_BBG is not set$/d' \
+            "$DEFCONFIG"
+
+          printf '%s\n' 'CONFIG_BBG=y' >> "$DEFCONFIG"
+
+          # Baseband Guard 的 setup 脚本会把这一行加入 security/Kconfig。
+          # 显式检查，避免生成悬空 Kconfig 引用后才在 defconfig 阶段失败。
+          grep -Fq 'source "security/baseband-guard/Kconfig"' security/Kconfig
+          test -e security/baseband-guard/Kconfig
+          test -e security/baseband-guard/Makefile
+          test -e security/baseband-guard/baseband_guard.c
+
+          echo "Baseband Guard 源码与 Kconfig 检查通过。"
+
+      - name: 应用内核基础配置与 CVE 补丁
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
+
+          set_config() {
+            local key="$1"
+            local value="$2"
+
+            sed -i -E \
+              "/^${key}=.*/d;/^# ${key} is not set$/d" \
+              "$DEFCONFIG"
+
+            printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
+          }
+
+          set_config CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE y
+          set_config CONFIG_CC_OPTIMIZE_FOR_SIZE n
+          set_config CONFIG_HEADERS_INSTALL n
+
+          mkdir -p assets/base
+
+          RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
+
+          curl -fL --retry 5 \
+            "$RAW_BASE/other_patch/cve-2026-43499-rtmutex-6.1.patch" \
+            -o assets/base/cve-2026-43499-rtmutex-6.1.patch
+
+          cd common
+
+          patch \
+            -p1 \
+            -F 3 \
+            --forward \
+            --batch \
+            < ../assets/base/cve-2026-43499-rtmutex-6.1.patch
+
+      - name: 生成并验证 GKI 配置
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace/common"
+
+          rm -rf out
 
           make \
             O=out \
             ARCH=arm64 \
-            LLVM=1 \
+            LLVM="$LLVM_VALUE" \
             LLVM_IAS=1 \
-            KCFLAGS=-Wno-error \
             gki_defconfig
 
-          test -f out/.config
-          grep -q '^CONFIG_ARM64=y$' out/.config
+          test -s out/.config
+
+          echo "=== 关键配置 ==="
+          grep -E '^(CONFIG_BBG|CONFIG_MQ_IOSCHED_SSG|CONFIG_MQ_IOSCHED_SSG_CGROUP|CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_LZ4|CONFIG_ZSMALLOC)=' out/.config || true
+          grep '^CONFIG_LSM=' out/.config || true
+
+          grep -q '^CONFIG_BBG=y$' out/.config
           grep -q '^CONFIG_MQ_IOSCHED_SSG=y$' out/.config
           grep -q '^CONFIG_MQ_IOSCHED_SSG_CGROUP=y$' out/.config
-          grep -q '^CONFIG_BBG=y$' out/.config
-          grep -q '^# CONFIG_KSU is not set$' out/.config || grep -q '^CONFIG_KSU=n$' out/.config
 
-          echo 'gki_defconfig 成功。'
+          LSM_LINE="$(grep '^CONFIG_LSM=' out/.config || true)"
+          case "$LSM_LINE" in
+            *baseband_guard*)
+              echo "CONFIG_LSM 已包含 baseband_guard。"
+              ;;
+            *)
+              echo "错误：CONFIG_LSM 中没有 baseband_guard。"
+              echo "实际值：${LSM_LINE:-<empty>}"
+              exit 1
+              ;;
+          esac
 
-      - name: 实际编译Image验证
+          echo "gki_defconfig 验证通过。"
+
+      - name: 编译 Image 和全部模块
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace/common"
-          export PATH="$LLVM20_BIN:$PATH"
 
-          echo '开始编译6.1.141 arm64 Image。'
+          echo "=== 编译器 ==="
+          "$CLANG_CMD" --version | head -n 1
+          "$LLD_CMD" --version | head -n 1
+
+          echo "=== 开始编译 Image + modules ==="
 
           make \
             -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
-            LLVM=1 \
+            LLVM="$LLVM_VALUE" \
             LLVM_IAS=1 \
-            KCFLAGS=-Wno-error \
-            Image
+            KCFLAGS="-Wno-error" \
+            Image modules
 
           test -f out/arch/arm64/boot/Image
-          test -s out/arch/arm64/boot/Image
 
-          echo 'Image 编译成功。'
+          echo "Image 编译成功："
           ls -lh out/arch/arm64/boot/Image
+
+          echo "模块编译检查："
+          test -f out/Module.symvers
+          find out -type f -name '*.ko' | head -n 20 || true
+
+          echo "Image + modules 编译验证通过。"
 
       - name: 生成本地编译脚本
         shell: bash
@@ -430,117 +370,185 @@ jobs:
           OUT_DIR="${OUT_DIR:-$ROOT_DIR/out}"
           JOBS="${JOBS:-$(nproc)}"
 
-          # 指定 LLVM/Clang 20 的 bin 目录：
-          #   LLVM=/path/to/clang/bin ./build_local.sh
-          #
-          # 未指定 LLVM 时直接使用 PATH 中的 LLVM 工具。
-          if [ -n "${LLVM:-}" ]; then
-            LLVM="${LLVM%/}"
-            export PATH="$LLVM:$PATH"
-          fi
+          get_major() {
+            "$1" --version | sed -n '1s/^[^0-9]*\([0-9][0-9]*\).*/\1/p'
+          }
 
-          export ARCH="${ARCH:-arm64}"
-          export CROSS_COMPILE="${CROSS_COMPILE:-}"
+          if command -v clang-20 >/dev/null 2>&1 && command -v ld.lld-20 >/dev/null 2>&1; then
+            LLVM_VALUE='-20'
+          elif command -v clang >/dev/null 2>&1 && [ "$(get_major clang)" = '20' ]; then
+            LLVM_VALUE='1'
+          else
+            echo "错误：本机需要 Clang 20。"
+            clang --version 2>/dev/null || true
+            ld.lld --version 2>/dev/null || true
+            exit 1
+          fi
 
           cd "$ROOT_DIR"
 
-          echo "ARCH=$ARCH"
-          echo "LLVM=${LLVM:-PATH}"
-          echo "CROSS_COMPILE=${CROSS_COMPILE:-LLVM integrated tools}"
+          echo "ARCH=arm64"
+          echo "LLVM=$LLVM_VALUE"
           echo "OUT_DIR=$OUT_DIR"
           echo "JOBS=$JOBS"
 
           make \
             O="$OUT_DIR" \
-            ARCH="$ARCH" \
-            LLVM=1 \
+            ARCH=arm64 \
+            LLVM="$LLVM_VALUE" \
             LLVM_IAS=1 \
             gki_defconfig
 
           make \
             -j"$JOBS" \
             O="$OUT_DIR" \
-            ARCH="$ARCH" \
-            LLVM=1 \
+            ARCH=arm64 \
+            LLVM="$LLVM_VALUE" \
             LLVM_IAS=1 \
-            Image
+            KCFLAGS="-Wno-error" \
+            Image modules
 
-          test -s "$OUT_DIR/arch/arm64/boot/Image"
-          echo "Image: $OUT_DIR/arch/arm64/boot/Image"
+          test -f "$OUT_DIR/arch/arm64/boot/Image"
+
+          echo
+          echo "编译完成：$OUT_DIR/arch/arm64/boot/Image"
           SCRIPT
 
           chmod +x build_local.sh
-          test -x build_local.sh
 
-      - name: 写入源码包说明
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$GITHUB_WORKSPACE/kernel_workspace/common"
-
-          cat > SOURCE_INFO.txt <<EOF
-          Kernel source package
-          =====================
-
-          Kernel version : ${KERNEL_VERSION}.${SUB_VERSION}
-          Android        : ${ANDROID_VERSION}
-          Repository      : https://github.com/${KERNEL_REPO}
-          Branch          : ${KERNEL_BRANCH}
-          Commit          : ${KERNEL_SHA}
-          Generated       : $(TZ="$TZ" date '+%Y-%m-%d %H:%M:%S %Z')
-
-          Fixed components
-          ----------------
-          KernelSU        : disabled
-          SUSFS           : disabled
-          KPM             : disabled
-          LZ4+Zstd        : enabled
-          LZ4KD           : disabled
-          BBR             : disabled
-          Droidspaces     : disabled
-          Better Net      : disabled
-          SSG             : enabled
-          Re-Kernel       : disabled
-          Baseband Guard  : enabled
-
-          Build verification
-          ------------------
-          gki_defconfig   : PASS
-          Image           : PASS
-          Image           : out/arch/arm64/boot/Image
-
-          Toolchain
-          ---------
-          GitHub Actions runner: ubuntu-26.04
-          Clang: runner-provided Clang 20
-          No downloaded LLVM/Clang archive is included.
-          No build-tools archive is included.
-          No ccache cache is included.
-
-          Local build
-          -----------
-          A clean local build needs an arm64-compatible LLVM/Clang 20 toolchain
-          and the normal Linux kernel host build dependencies.
-          EOF
-
-      - name: 删除编译输出并打包源码
+      - name: 转换外部组件软链接为源码目录并清理
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
+          # Baseband Guard：将 setup.sh 创建的外部软链接转换成真正源码目录。
+          if [ -L common/security/baseband-guard ]; then
+            rm -f common/security/baseband-guard
+          fi
+
+          cp -a common/Baseband-guard common/security/baseband-guard
+          rm -rf common/Baseband-guard
+
+          # 删除组件仓库自身的 Git 元数据，保留实际源码。
+          rm -rf common/security/baseband-guard/.git
+
+          # 删除临时下载内容和编译输出。
+          rm -rf assets
           rm -rf common/out
 
-          test ! -d common/out
-          test -f common/SOURCE_INFO.txt
-          test -x common/build_local.sh
+          test -d common/security/baseband-guard
+          test -f common/security/baseband-guard/Kconfig
+          test -f common/security/baseband-guard/Makefile
+          test -f common/security/baseband-guard/baseband_guard.c
+
+          # 不能存在悬空的 baseband-guard 软链接。
+          if [ -L common/security/baseband-guard ]; then
+            echo "错误：baseband-guard 仍为软链接。"
+            exit 1
+          fi
+
+      - name: 生成源码说明
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          cat > common/SOURCE_INFO.txt <<EOF
+          Kernel source package
+          =====================
+
+          Kernel version : ${KERNEL_VERSION}.${SUB_VERSION}
+          Android        : ${ANDROID_VERSION}
+          Source repo    : https://github.com/${KERNEL_REPO}
+          Source branch  : ${KERNEL_BRANCH}
+          Generated by   : ${GITHUB_REPOSITORY}
+          Workflow run   : ${GITHUB_RUN_ID}
+          Generated time : $(TZ="$TZ" date '+%Y-%m-%d %H:%M:%S %Z')
+
+          Fixed components
+          ----------------
+          KernelSU       : disabled
+          SUSFS          : disabled
+          KPM            : disabled
+          LZ4 + Zstd     : enabled
+          LZ4KD          : disabled
+          BBR            : disabled
+          Droidspaces    : disabled
+          Better Net     : disabled
+          SSG            : enabled
+          Re-Kernel      : disabled
+          Baseband Guard : enabled
+
+          GitHub build verification
+          --------------------------
+          gki_defconfig : passed
+          Image          : passed
+          modules        : passed
+
+          Local build
+          -----------
+          This package does not contain Clang/LLVM or other external toolchains.
+          A local Clang 20 toolchain is required.
+
+          Build command:
+              ./build_local.sh
+
+          Manual build:
+              make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 gki_defconfig
+              make -j\$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 Image modules
+          EOF
+
+      - name: 最终源码完整性检查
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
           test -f common/Makefile
           test -f common/Kconfig
+          test -f common/arch/arm64/Kconfig
           test -f common/arch/arm64/configs/gki_defconfig
+          test -f common/security/Kconfig
+          test -f common/security/baseband-guard/Kconfig
+          test -f common/security/baseband-guard/Makefile
+          test -f common/security/baseband-guard/baseband_guard.c
+          test -f common/lib/lz4/lz4armv8/lz4armv8.S
+          test -f common/build_local.sh
+          test -f common/SOURCE_INFO.txt
 
-          ARCHIVE="android_kernel_common_sm8650_${KERNEL_VERSION}.${SUB_VERSION}_${KERNEL_NAME}.tar.zst"
+          if find common \
+            -type d \
+            \( -name out -o -name clang20 -o -name build-tools \) \
+            -print -quit | grep -q .
+          then
+            echo "错误：源码包中存在不应包含的构建输出或工具链目录。"
+            exit 1
+          fi
+
+          if find common \
+            -type l \
+            -lname '*' \
+            -print -quit | grep -q .
+          then
+            echo "发现源码树中的软链接："
+            find common -type l -print
+          fi
+
+          du -sh common
+          echo "最终源码完整性检查通过。"
+
+      - name: 打包完整源码
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          ARCHIVE="android_kernel_common_sm8650_6.1.141_${KERNEL_NAME}.tar.zst"
 
           tar \
             --zstd \
@@ -549,31 +557,24 @@ jobs:
 
           sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 
-          echo "ARCHIVE=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE" >> "$GITHUB_ENV"
-          echo "CHECKSUM=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE.sha256" >> "$GITHUB_ENV"
+          echo "SOURCE_ARCHIVE=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE" >> "$GITHUB_ENV"
+          echo "SOURCE_SHA256=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE.sha256" >> "$GITHUB_ENV"
 
           ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
+          cat "$ARCHIVE.sha256"
 
-      - name: 上传内核源码包
+      - name: 上传完整源码
         uses: actions/upload-artifact@v7
         with:
-          name: kernel-source-6.1.141-${{ github.run_number }}
-          path: ${{ env.ARCHIVE }}
+          name: kernel-source-6.1.141
+          path: ${{ env.SOURCE_ARCHIVE }}
           archive: false
           if-no-files-found: error
 
-      - name: 上传SHA256校验文件
+      - name: 上传 SHA256
         uses: actions/upload-artifact@v7
         with:
-          name: kernel-source-6.1.141-${{ github.run_number }}-sha256
-          path: ${{ env.CHECKSUM }}
-          archive: false
-          if-no-files-found: error
-
-      - name: 上传SHA256校验文件
-        uses: actions/upload-artifact@v7
-        with:
-          name: kernel-source-sha256-6.1.141-${{ github.run_number }}
-          path: ${{ env.CHECKSUM }}
+          name: kernel-source-6.1.141-sha256
+          path: ${{ env.SOURCE_SHA256 }}
           archive: false
           if-no-files-found: error
