@@ -227,32 +227,18 @@ jobs:
           BBG_SRC="$PWD/Baseband-guard"
           BBG_DST="$SECURITY_DIR/baseband-guard"
 
-          # setup.sh 的作用在这里显式完成，避免最终源码产生指向包外部的软链接。
-          if ! grep -q 'baseband-guard/baseband_guard.o' "$SECURITY_DIR/Makefile"; then
+          # 将 Baseband Guard 直接集成到 common/security，最终源码包不依赖包外软链接。
+          if ! grep -Fqx 'obj-$(CONFIG_BBG) += baseband-guard/' "$SECURITY_DIR/Makefile"; then
             printf '\nobj-$(CONFIG_BBG) += baseband-guard/\n' >> "$SECURITY_DIR/Makefile"
           fi
 
-          if ! grep -q 'security/baseband-guard/Kconfig' "$SECURITY_DIR/Kconfig"; then
-            awk '
-              { a[NR]=$0 }
-              END {
-                last=0
-                for (i=1; i<=NR; i++) {
-                  if (a[i] ~ /^endmenu[[:space:]]*$/) last=i
-                }
-                if (last == 0) {
-                  for (i=1; i<=NR; i++) print a[i]
-                  print "source \\\"security/baseband-guard/Kconfig\\\""
-                } else {
-                  for (i=1; i<=NR; i++) {
-                    if (i == last) print "source \\\"security/baseband-guard/Kconfig\\\""
-                    print a[i]
-                  }
-                }
-              }
-            ' "$SECURITY_DIR/Kconfig" > "$SECURITY_DIR/Kconfig.tmp"
-            mv "$SECURITY_DIR/Kconfig.tmp" "$SECURITY_DIR/Kconfig"
+          # 直接插入合法的 Kconfig source 语句。
+          # 不使用 awk 的多层引号转义，避免生成 source \"...\" 这类非法内容。
+          if ! grep -Fqx 'source "security/baseband-guard/Kconfig"' "$SECURITY_DIR/Kconfig"; then
+            sed -i '/^endmenu[[:space:]]*$/i source "security/baseband-guard/Kconfig"' "$SECURITY_DIR/Kconfig"
           fi
+
+          test "$(grep -Fxc 'source "security/baseband-guard/Kconfig"' "$SECURITY_DIR/Kconfig")" -eq 1
 
           # 复制完整 Baseband Guard 源码到最终源码树内部。
           rm -rf "$BBG_DST"
@@ -429,6 +415,63 @@ jobs:
           echo 'Image 编译成功。'
           ls -lh out/arch/arm64/boot/Image
 
+      - name: 生成本地编译脚本
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace/common"
+
+          cat > build_local.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          OUT_DIR="${OUT_DIR:-$ROOT_DIR/out}"
+          JOBS="${JOBS:-$(nproc)}"
+
+          # 指定 LLVM/Clang 20 的 bin 目录：
+          #   LLVM=/path/to/clang/bin ./build_local.sh
+          #
+          # 未指定 LLVM 时直接使用 PATH 中的 LLVM 工具。
+          if [ -n "${LLVM:-}" ]; then
+            LLVM="${LLVM%/}"
+            export PATH="$LLVM:$PATH"
+          fi
+
+          export ARCH="${ARCH:-arm64}"
+          export CROSS_COMPILE="${CROSS_COMPILE:-}"
+
+          cd "$ROOT_DIR"
+
+          echo "ARCH=$ARCH"
+          echo "LLVM=${LLVM:-PATH}"
+          echo "CROSS_COMPILE=${CROSS_COMPILE:-LLVM integrated tools}"
+          echo "OUT_DIR=$OUT_DIR"
+          echo "JOBS=$JOBS"
+
+          make \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            gki_defconfig
+
+          make \
+            -j"$JOBS" \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            Image
+
+          test -s "$OUT_DIR/arch/arm64/boot/Image"
+          echo "Image: $OUT_DIR/arch/arm64/boot/Image"
+          SCRIPT
+
+          chmod +x build_local.sh
+          test -x build_local.sh
+
       - name: 写入源码包说明
         shell: bash
         run: |
@@ -492,6 +535,7 @@ jobs:
 
           test ! -d common/out
           test -f common/SOURCE_INFO.txt
+          test -x common/build_local.sh
           test -f common/Makefile
           test -f common/Kconfig
           test -f common/arch/arm64/configs/gki_defconfig
@@ -515,6 +559,14 @@ jobs:
         with:
           name: kernel-source-6.1.141-${{ github.run_number }}
           path: ${{ env.ARCHIVE }}
+          archive: false
+          if-no-files-found: error
+
+      - name: 上传SHA256校验文件
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-source-6.1.141-${{ github.run_number }}-sha256
+          path: ${{ env.CHECKSUM }}
           archive: false
           if-no-files-found: error
 
