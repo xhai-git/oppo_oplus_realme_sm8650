@@ -9,15 +9,21 @@ env:
   KERNEL_REPO: 'cctv18/android_kernel_common_oneplus_sm8650'
   KERNEL_BRANCH: 'oneplus/sm8650_b_16.0.0_oneplus12_6.1.141'
 
+  # Android Clang 20 / r547379
+  CLANG_REVISION: 'r547379'
+  CLANG_BRANCH: 'llvm-r547379-release'
+
 on:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
-    timeout-minutes: 90
+
+    timeout-minutes: 180
 
     steps:
       - name: 安装编译依赖
@@ -26,11 +32,15 @@ jobs:
           set -euo pipefail
 
           sudo apt-get update
+
           sudo apt-get install -y --no-install-recommends \
             bc \
             bison \
             build-essential \
             flex \
+            git \
+            patch \
+            curl \
             libelf-dev \
             libssl-dev \
             libdw-dev \
@@ -41,45 +51,68 @@ jobs:
             kmod \
             zstd
 
-      - name: 检查本机 Clang 20
+      - name: 下载 Android Clang 20 r547379
         shell: bash
         run: |
           set -euo pipefail
 
-          get_major() {
-            "$1" --version | sed -n '1s/^[^0-9]*\([0-9][0-9]*\).*/\1/p'
-          }
+          TOOLCHAIN_ROOT="$GITHUB_WORKSPACE/toolchains/clang-r547379"
 
-          if command -v clang-20 >/dev/null 2>&1 && command -v ld.lld-20 >/dev/null 2>&1; then
-            LLVM_VALUE='-20'
-            CLANG_CMD="$(command -v clang-20)"
-            LLD_CMD="$(command -v ld.lld-20)"
-          elif command -v clang >/dev/null 2>&1 && [ "$(get_major clang)" = '20' ]; then
-            LLVM_VALUE='1'
-            CLANG_CMD="$(command -v clang)"
-            LLD_CMD="$(command -v ld.lld 2>/dev/null || true)"
+          rm -rf "$TOOLCHAIN_ROOT"
+          mkdir -p "$TOOLCHAIN_ROOT"
 
-            if [ -z "$LLD_CMD" ]; then
-              echo "错误：Clang 20 存在，但 ld.lld 不存在。"
-              exit 1
-            fi
-          else
-            echo "错误：Runner 中没有可用的 Clang 20。"
-            echo "当前 clang："
-            clang --version 2>/dev/null || true
-            echo "当前 ld.lld："
-            ld.lld --version 2>/dev/null || true
-            exit 1
-          fi
+          CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${CLANG_BRANCH}/clang-${CLANG_REVISION}.tar.gz"
 
-          echo "LLVM_VALUE=$LLVM_VALUE" >> "$GITHUB_ENV"
-          echo "CLANG_CMD=$CLANG_CMD" >> "$GITHUB_ENV"
-          echo "LLD_CMD=$LLD_CMD" >> "$GITHUB_ENV"
+          echo "=== Android Clang ==="
+          echo "Revision : ${CLANG_REVISION}"
+          echo "Branch   : ${CLANG_BRANCH}"
+          echo "URL      : ${CLANG_URL}"
+          echo
 
-          echo "Clang：$CLANG_CMD"
-          "$CLANG_CMD" --version | head -n 1
-          echo "LLD：$LLD_CMD"
-          "$LLD_CMD" --version | head -n 1
+          curl -fL \
+            --retry 5 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --max-time 1800 \
+            "$CLANG_URL" \
+            -o "$RUNNER_TEMP/clang-r547379.tar.gz"
+
+          echo "=== 解压 Clang ==="
+
+          tar \
+            -xzf "$RUNNER_TEMP/clang-r547379.tar.gz" \
+            -C "$TOOLCHAIN_ROOT"
+
+          rm -f "$RUNNER_TEMP/clang-r547379.tar.gz"
+
+          test -x "$TOOLCHAIN_ROOT/bin/clang"
+          test -x "$TOOLCHAIN_ROOT/bin/clang-20"
+          test -x "$TOOLCHAIN_ROOT/bin/ld.lld"
+
+          echo "$TOOLCHAIN_ROOT/bin" >> "$GITHUB_PATH"
+
+          echo "LLVM_VALUE=$TOOLCHAIN_ROOT/bin/" >> "$GITHUB_ENV"
+          echo "CLANG_CMD=$TOOLCHAIN_ROOT/bin/clang" >> "$GITHUB_ENV"
+          echo "LLD_CMD=$TOOLCHAIN_ROOT/bin/ld.lld" >> "$GITHUB_ENV"
+
+          echo
+          echo "=== 检查 Android Clang 20 ==="
+
+          "$TOOLCHAIN_ROOT/bin/clang" --version
+          echo
+          "$TOOLCHAIN_ROOT/bin/ld.lld" --version
+
+          "$TOOLCHAIN_ROOT/bin/clang" --version \
+            | grep -Fq 'clang version 20.0.0'
+
+          "$TOOLCHAIN_ROOT/bin/clang" --version \
+            | grep -Fq 'b718bcaf8c198c82f3021447d943401e3ab5bd54'
+
+          "$TOOLCHAIN_ROOT/bin/ld.lld" --version \
+            | grep -Fq 'LLD 20.0.0'
+
+          echo
+          echo "Android Clang r547379 验证通过。"
 
       - name: 初始化工作目录
         shell: bash
@@ -88,6 +121,7 @@ jobs:
 
           rm -rf "$GITHUB_WORKSPACE/kernel_workspace"
           mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           echo "源码仓库：$KERNEL_REPO"
@@ -103,7 +137,10 @@ jobs:
 
           SRC_URL="https://github.com/${KERNEL_REPO}/archive/refs/heads/${KERNEL_BRANCH}.tar.gz"
 
-          curl -fL --retry 5 --retry-delay 2 --connect-timeout 30 \
+          curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            --connect-timeout 30 \
             "$SRC_URL" \
             -o kernel-source.tar.gz
 
@@ -111,12 +148,17 @@ jobs:
           rm -f kernel-source.tar.gz
 
           SRC_DIR="$({
-            find . -mindepth 1 -maxdepth 1 -type d \
+            find . \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
               -name 'android_kernel_common_oneplus_sm8650-*' \
-              -print -quit
+              -print \
+              -quit
           })"
 
           [ -n "$SRC_DIR" ]
+
           mv "$SRC_DIR" common
 
           test -f common/Makefile
@@ -151,24 +193,29 @@ jobs:
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
+
           mkdir -p assets/zram
 
-          curl -fL --retry 5 \
+          curl -fL \
+            --retry 5 \
             "$RAW_BASE/zram_patch/001-lz4.patch" \
             -o assets/zram/001-lz4.patch
 
-          curl -fL --retry 5 \
+          curl -fL \
+            --retry 5 \
             "$RAW_BASE/zram_patch/lz4armv8.S" \
             -o assets/zram/lz4armv8.S
 
-          curl -fL --retry 5 \
+          curl -fL \
+            --retry 5 \
             "$RAW_BASE/zram_patch/002-zstd.patch" \
             -o assets/zram/002-zstd.patch
 
-          # 001-lz4.patch 包含 lz4armv8.S 的 binary diff。
-          # 先放置实际二进制源码文件，再让 git apply 排除这个 binary diff。
           mkdir -p common/lib/lz4/lz4armv8
-          cp assets/zram/lz4armv8.S common/lib/lz4/lz4armv8/lz4armv8.S
+
+          cp \
+            assets/zram/lz4armv8.S \
+            common/lib/lz4/lz4armv8/lz4armv8.S
 
           cd common
 
@@ -222,6 +269,7 @@ jobs:
             -o /tmp/baseband-guard-setup.sh
 
           chmod +x /tmp/baseband-guard-setup.sh
+
           /tmp/baseband-guard-setup.sh
 
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
@@ -232,9 +280,10 @@ jobs:
 
           printf '%s\n' 'CONFIG_BBG=y' >> "$DEFCONFIG"
 
-          # Baseband Guard 的 setup 脚本会把这一行加入 security/Kconfig。
-          # 显式检查，避免生成悬空 Kconfig 引用后才在 defconfig 阶段失败。
-          grep -Fq 'source "security/baseband-guard/Kconfig"' security/Kconfig
+          grep -Fq \
+            'source "security/baseband-guard/Kconfig"' \
+            security/Kconfig
+
           test -e security/baseband-guard/Kconfig
           test -e security/baseband-guard/Makefile
           test -e security/baseband-guard/baseband_guard.c
@@ -269,7 +318,8 @@ jobs:
 
           RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
 
-          curl -fL --retry 5 \
+          curl -fL \
+            --retry 5 \
             "$RAW_BASE/other_patch/cve-2026-43499-rtmutex-6.1.patch" \
             -o assets/base/cve-2026-43499-rtmutex-6.1.patch
 
@@ -300,8 +350,17 @@ jobs:
 
           test -s out/.config
 
+          echo "=== 使用的编译器 ==="
+          "$CLANG_CMD" --version | head -n 1
+          "$LLD_CMD" --version | head -n 1
+
+          echo
           echo "=== 关键配置 ==="
-          grep -E '^(CONFIG_BBG|CONFIG_MQ_IOSCHED_SSG|CONFIG_MQ_IOSCHED_SSG_CGROUP|CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_LZ4|CONFIG_ZSMALLOC)=' out/.config || true
+
+          grep -E \
+            '^(CONFIG_BBG|CONFIG_MQ_IOSCHED_SSG|CONFIG_MQ_IOSCHED_SSG_CGROUP|CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_LZ4|CONFIG_ZSMALLOC)=' \
+            out/.config || true
+
           grep '^CONFIG_LSM=' out/.config || true
 
           grep -q '^CONFIG_BBG=y$' out/.config
@@ -309,6 +368,7 @@ jobs:
           grep -q '^CONFIG_MQ_IOSCHED_SSG_CGROUP=y$' out/.config
 
           LSM_LINE="$(grep '^CONFIG_LSM=' out/.config || true)"
+
           case "$LSM_LINE" in
             *baseband_guard*)
               echo "CONFIG_LSM 已包含 baseband_guard。"
@@ -320,6 +380,7 @@ jobs:
               ;;
           esac
 
+          echo
           echo "gki_defconfig 验证通过。"
 
       - name: 编译 Image 和全部模块
@@ -333,7 +394,14 @@ jobs:
           "$CLANG_CMD" --version | head -n 1
           "$LLD_CMD" --version | head -n 1
 
-          echo "=== 开始编译 Image + modules ==="
+          echo
+          echo "=== TOOLCHAIN ==="
+          echo "LLVM=$LLVM_VALUE"
+          echo "CLANG=$CLANG_CMD"
+          echo "LLD=$LLD_CMD"
+
+          echo
+          echo "=== 开始云端编译 Image + modules ==="
 
           make \
             -j"$(nproc)" \
@@ -346,14 +414,26 @@ jobs:
 
           test -f out/arch/arm64/boot/Image
 
+          echo
           echo "Image 编译成功："
           ls -lh out/arch/arm64/boot/Image
 
+          echo
           echo "模块编译检查："
-          test -f out/Module.symvers
-          find out -type f -name '*.ko' | head -n 20 || true
 
-          echo "Image + modules 编译验证通过。"
+          test -f out/Module.symvers
+
+          MODULE_COUNT="$(find out -type f -name '*.ko' | wc -l)"
+
+          echo "KO 数量：$MODULE_COUNT"
+
+          find out \
+            -type f \
+            -name '*.ko' \
+            | head -n 20 || true
+
+          echo
+          echo "Image + modules 云端编译验证通过。"
 
       - name: 生成本地编译脚本
         shell: bash
@@ -423,31 +503,44 @@ jobs:
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          # Baseband Guard：将 setup.sh 创建的外部软链接转换成真正源码目录。
+          # Baseband Guard：
+          # setup.sh 创建的是外部仓库目录 + security 下软链接。
+          # 打包前转换为真正源码目录。
           if [ -L common/security/baseband-guard ]; then
             rm -f common/security/baseband-guard
           fi
 
-          cp -a common/Baseband-guard common/security/baseband-guard
+          cp -a \
+            common/Baseband-guard \
+            common/security/baseband-guard
+
           rm -rf common/Baseband-guard
 
-          # 删除组件仓库自身的 Git 元数据，保留实际源码。
           rm -rf common/security/baseband-guard/.git
-
-          # 删除临时下载内容和编译输出。
-          rm -rf assets
-          rm -rf common/out
 
           test -d common/security/baseband-guard
           test -f common/security/baseband-guard/Kconfig
           test -f common/security/baseband-guard/Makefile
           test -f common/security/baseband-guard/baseband_guard.c
 
-          # 不能存在悬空的 baseband-guard 软链接。
           if [ -L common/security/baseband-guard ]; then
             echo "错误：baseband-guard 仍为软链接。"
             exit 1
           fi
+
+          echo "Baseband Guard 已转换为完整源码目录。"
+
+      - name: 清理编译输出和临时文件
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          rm -rf assets
+          rm -rf common/out
+
+          echo "编译输出和临时文件清理完成。"
 
       - name: 生成源码说明
         shell: bash
@@ -468,6 +561,12 @@ jobs:
           Workflow run   : ${GITHUB_RUN_ID}
           Generated time : $(TZ="$TZ" date '+%Y-%m-%d %H:%M:%S %Z')
 
+          Cloud compiler
+          --------------
+          Compiler       : Android Clang 20.0.0
+          Clang revision : clang-${CLANG_REVISION}
+          Clang branch   : ${CLANG_BRANCH}
+
           Fixed components
           ----------------
           KernelSU       : disabled
@@ -482,8 +581,8 @@ jobs:
           Re-Kernel      : disabled
           Baseband Guard : enabled
 
-          GitHub build verification
-          --------------------------
+          GitHub cloud build verification
+          --------------------------------
           gki_defconfig : passed
           Image          : passed
           modules        : passed
@@ -512,18 +611,26 @@ jobs:
           test -f common/Kconfig
           test -f common/arch/arm64/Kconfig
           test -f common/arch/arm64/configs/gki_defconfig
+
           test -f common/security/Kconfig
           test -f common/security/baseband-guard/Kconfig
           test -f common/security/baseband-guard/Makefile
           test -f common/security/baseband-guard/baseband_guard.c
+
           test -f common/lib/lz4/lz4armv8/lz4armv8.S
           test -f common/build_local.sh
           test -f common/SOURCE_INFO.txt
 
           if find common \
             -type d \
-            \( -name out -o -name clang20 -o -name build-tools \) \
-            -print -quit | grep -q .
+            \( \
+              -name out \
+              -o -name clang20 \
+              -o -name clang-r547379 \
+              -o -name build-tools \
+            \) \
+            -print -quit \
+            | grep -q .
           then
             echo "错误：源码包中存在不应包含的构建输出或工具链目录。"
             exit 1
@@ -531,14 +638,15 @@ jobs:
 
           if find common \
             -type l \
-            -lname '*' \
-            -print -quit | grep -q .
+            -print -quit \
+            | grep -q .
           then
             echo "发现源码树中的软链接："
             find common -type l -print
           fi
 
           du -sh common
+
           echo "最终源码完整性检查通过。"
 
       - name: 打包完整源码
@@ -560,7 +668,11 @@ jobs:
           echo "SOURCE_ARCHIVE=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE" >> "$GITHUB_ENV"
           echo "SOURCE_SHA256=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE.sha256" >> "$GITHUB_ENV"
 
-          ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
+          ls -lh \
+            "$ARCHIVE" \
+            "$ARCHIVE.sha256"
+
+          echo
           cat "$ARCHIVE.sha256"
 
       - name: 上传完整源码
