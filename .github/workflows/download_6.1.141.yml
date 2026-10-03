@@ -9,7 +9,7 @@ env:
   KERNEL_REPO: 'cctv18/android_kernel_common_oneplus_sm8650'
   KERNEL_BRANCH: 'oneplus/sm8650_b_16.0.0_oneplus12_6.1.141'
 
-  # Android Clang 20 / r547379
+  # Android 官方 Clang 20 / r547379
   CLANG_REVISION: 'r547379'
   CLANG_BRANCH: 'llvm-r547379-release'
 
@@ -26,6 +26,10 @@ jobs:
     timeout-minutes: 180
 
     steps:
+
+      # ============================================================
+      # 1. 编译依赖
+      # ============================================================
       - name: 安装编译依赖
         shell: bash
         run: |
@@ -51,6 +55,9 @@ jobs:
             kmod \
             zstd
 
+      # ============================================================
+      # 2. Android Clang 20 r547379
+      # ============================================================
       - name: 下载 Android Clang 20 r547379
         shell: bash
         run: |
@@ -63,7 +70,9 @@ jobs:
 
           CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${CLANG_BRANCH}/clang-${CLANG_REVISION}.tar.gz"
 
-          echo "=== Android Clang ==="
+          echo "========================================"
+          echo "Android Clang"
+          echo "========================================"
           echo "Revision : ${CLANG_REVISION}"
           echo "Branch   : ${CLANG_BRANCH}"
           echo "URL      : ${CLANG_URL}"
@@ -77,8 +86,6 @@ jobs:
             "$CLANG_URL" \
             -o "$RUNNER_TEMP/clang-r547379.tar.gz"
 
-          echo "=== 解压 Clang ==="
-
           tar \
             -xzf "$RUNNER_TEMP/clang-r547379.tar.gz" \
             -C "$TOOLCHAIN_ROOT"
@@ -86,17 +93,19 @@ jobs:
           rm -f "$RUNNER_TEMP/clang-r547379.tar.gz"
 
           test -x "$TOOLCHAIN_ROOT/bin/clang"
-          test -x "$TOOLCHAIN_ROOT/bin/clang-20"
           test -x "$TOOLCHAIN_ROOT/bin/ld.lld"
 
           echo "$TOOLCHAIN_ROOT/bin" >> "$GITHUB_PATH"
 
+          # LLVM=目录/
           echo "LLVM_VALUE=$TOOLCHAIN_ROOT/bin/" >> "$GITHUB_ENV"
           echo "CLANG_CMD=$TOOLCHAIN_ROOT/bin/clang" >> "$GITHUB_ENV"
           echo "LLD_CMD=$TOOLCHAIN_ROOT/bin/ld.lld" >> "$GITHUB_ENV"
 
           echo
-          echo "=== 检查 Android Clang 20 ==="
+          echo "========================================"
+          echo "验证 Clang"
+          echo "========================================"
 
           "$TOOLCHAIN_ROOT/bin/clang" --version
           echo
@@ -114,13 +123,18 @@ jobs:
           echo
           echo "Android Clang r547379 验证通过。"
 
+      # ============================================================
+      # 3. 初始化目录
+      # ============================================================
       - name: 初始化工作目录
         shell: bash
         run: |
           set -euo pipefail
 
           rm -rf "$GITHUB_WORKSPACE/kernel_workspace"
-          mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
+
+          mkdir -p \
+            "$GITHUB_WORKSPACE/kernel_workspace"
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
@@ -128,6 +142,9 @@ jobs:
           echo "源码分支：$KERNEL_BRANCH"
           echo "内核版本：$KERNEL_VERSION.$SUB_VERSION"
 
+      # ============================================================
+      # 4. 下载完整源码
+      # ============================================================
       - name: 下载 6.1.141 完整源码
         shell: bash
         run: |
@@ -144,10 +161,12 @@ jobs:
             "$SRC_URL" \
             -o kernel-source.tar.gz
 
-          tar -xzf kernel-source.tar.gz
+          tar \
+            -xzf kernel-source.tar.gz
+
           rm -f kernel-source.tar.gz
 
-          SRC_DIR="$({
+          SRC_DIR="$(
             find . \
               -mindepth 1 \
               -maxdepth 1 \
@@ -155,16 +174,21 @@ jobs:
               -name 'android_kernel_common_oneplus_sm8650-*' \
               -print \
               -quit
-          })"
+          )"
 
-          [ -n "$SRC_DIR" ]
+          test -n "$SRC_DIR"
 
           mv "$SRC_DIR" common
+
+          echo "========================================"
+          echo "源码基础检查"
+          echo "========================================"
 
           test -f common/Makefile
           test -f common/Kconfig
           test -f common/arch/arm64/Kconfig
           test -f common/arch/arm64/configs/gki_defconfig
+
           test -d common/drivers
           test -d common/security
           test -d common/include
@@ -172,6 +196,9 @@ jobs:
 
           echo "6.1.141 源码基础检查通过。"
 
+      # ============================================================
+      # 5. 删除 ABI 保护 / dirty
+      # ============================================================
       - name: 删除 ABI 保护并移除 dirty 后缀
         shell: bash
         run: |
@@ -179,12 +206,18 @@ jobs:
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          rm -f common/android/abi_gki_protected_exports_* || true
+          rm -f \
+            common/android/abi_gki_protected_exports_* \
+            || true
 
           if [ -f common/scripts/setlocalversion ]; then
-            sed -i 's/ -dirty//g' common/scripts/setlocalversion
+            sed -i 's/ -dirty//g' \
+              common/scripts/setlocalversion
           fi
 
+      # ============================================================
+      # 6. LZ4 + Zstd
+      # ============================================================
       - name: 配置 LZ4 1.10.0 + Zstd 1.5.7
         shell: bash
         run: |
@@ -211,7 +244,8 @@ jobs:
             "$RAW_BASE/zram_patch/002-zstd.patch" \
             -o assets/zram/002-zstd.patch
 
-          mkdir -p common/lib/lz4/lz4armv8
+          mkdir -p \
+            common/lib/lz4/lz4armv8
 
           cp \
             assets/zram/lz4armv8.S \
@@ -230,10 +264,14 @@ jobs:
             --batch \
             < ../assets/zram/002-zstd.patch
 
-          test -f lib/lz4/lz4armv8/lz4armv8.S
+          test -f \
+            lib/lz4/lz4armv8/lz4armv8.S
 
           echo "LZ4 + Zstd 补丁应用完成。"
 
+      # ============================================================
+      # 7. SSG
+      # ============================================================
       - name: 配置三星 SSG IO 调度器
         shell: bash
         run: |
@@ -251,12 +289,19 @@ jobs:
               "/^${key}=.*/d;/^# ${key} is not set$/d" \
               "$DEFCONFIG"
 
-            printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
+            printf '%s\n' \
+              "${key}=${value}" \
+              >> "$DEFCONFIG"
           }
 
           set_config CONFIG_MQ_IOSCHED_SSG y
           set_config CONFIG_MQ_IOSCHED_SSG_CGROUP y
 
+          echo "SSG 配置完成。"
+
+      # ============================================================
+      # 8. Baseband Guard
+      # ============================================================
       - name: 配置 Baseband Guard
         shell: bash
         run: |
@@ -268,48 +313,54 @@ jobs:
             https://raw.githubusercontent.com/cctv18/Baseband-guard/master/setup.sh \
             -o /tmp/baseband-guard-setup.sh
 
-          chmod +x /tmp/baseband-guard-setup.sh
+          chmod +x \
+            /tmp/baseband-guard-setup.sh
+
           /tmp/baseband-guard-setup.sh
 
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
 
-          # 启用 Baseband Guard
+          # BBG
           sed -i -E \
             '/^CONFIG_BBG=.*/d;/^# CONFIG_BBG is not set$/d' \
             "$DEFCONFIG"
 
-          printf '%s\n' 'CONFIG_BBG=y' >> "$DEFCONFIG"
+          printf '%s\n' \
+            'CONFIG_BBG=y' \
+            >> "$DEFCONFIG"
 
-          if grep -q '^CONFIG_LSM=' "$DEFCONFIG"; then
-            sed -i \
-              's/^CONFIG_LSM="\([^"]*\)"/CONFIG_LSM="\1,baseband_guard"/' \
-              "$DEFCONFIG"
-          else
-            printf '%s\n' \
-              'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' \
-              >> "$DEFCONFIG"
-          fi
+          # 不在这里修改 CONFIG_LSM。
+          #
+          # CONFIG_LSM 是 Kconfig string symbol。
+          # 该仓库的 gki_defconfig 原始文件中不存在 CONFIG_LSM，
+          # make gki_defconfig 后会生成 Kconfig 默认值。
+          #
+          # 因此在 gki_defconfig 完成以后，再直接修改 out/.config。
+          #
+          # 这里只检查 Baseband Guard 源码接入是否成功。
 
-          # 防止重复加入
-          sed -i \
-            's/,baseband_guard,baseband_guard/,baseband_guard/g' \
-            "$DEFCONFIG"
-
-          echo "=== Baseband Guard 配置 ==="
-          grep '^CONFIG_BBG=' "$DEFCONFIG"
-          grep '^CONFIG_LSM=' "$DEFCONFIG"
-
-          # 源码接入检查
           grep -Fq \
             'source "security/baseband-guard/Kconfig"' \
             security/Kconfig
 
-          test -e security/baseband-guard/Kconfig
-          test -e security/baseband-guard/Makefile
-          test -e security/baseband-guard/baseband_guard.c
+          grep -Fq \
+            'baseband-guard/baseband_guard.o' \
+            security/Makefile
+
+          test -e \
+            security/baseband-guard/Kconfig
+
+          test -e \
+            security/baseband-guard/Makefile
+
+          test -e \
+            security/baseband-guard/baseband_guard.c
 
           echo "Baseband Guard 源码与 Kconfig 检查通过。"
 
+      # ============================================================
+      # 9. 其它基础配置 + CVE
+      # ============================================================
       - name: 应用内核基础配置与 CVE 补丁
         shell: bash
         run: |
@@ -327,12 +378,22 @@ jobs:
               "/^${key}=.*/d;/^# ${key} is not set$/d" \
               "$DEFCONFIG"
 
-            printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
+            printf '%s\n' \
+              "${key}=${value}" \
+              >> "$DEFCONFIG"
           }
 
-          set_config CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE y
-          set_config CONFIG_CC_OPTIMIZE_FOR_SIZE n
-          set_config CONFIG_HEADERS_INSTALL n
+          set_config \
+            CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE \
+            y
+
+          set_config \
+            CONFIG_CC_OPTIMIZE_FOR_SIZE \
+            n
+
+          set_config \
+            CONFIG_HEADERS_INSTALL \
+            n
 
           mkdir -p assets/base
 
@@ -352,7 +413,12 @@ jobs:
             --batch \
             < ../assets/base/cve-2026-43499-rtmutex-6.1.patch
 
-      - name: 生成并验证 GKI 配置
+          echo "基础配置与 CVE 补丁应用完成。"
+
+      # ============================================================
+      # 10. gki_defconfig
+      # ============================================================
+      - name: 生成 GKI 配置
         shell: bash
         run: |
           set -euo pipefail
@@ -368,26 +434,133 @@ jobs:
             LLVM_IAS=1 \
             gki_defconfig
 
-          test -s out/.config
+          test -s \
+            out/.config
 
-          echo "=== 使用的编译器 ==="
-          "$CLANG_CMD" --version | head -n 1
-          "$LLD_CMD" --version | head -n 1
+          echo "gki_defconfig 完成。"
+
+      # ============================================================
+      # 11. 强制修正最终 .config
+      # ============================================================
+      - name: 设置最终 CONFIG_LSM 与关键配置
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace/common"
+
+          CONFIG="out/.config"
+
+          test -s "$CONFIG"
+
+          echo "========================================"
+          echo "修改前 CONFIG_LSM"
+          echo "========================================"
+
+          grep '^CONFIG_LSM=' \
+            "$CONFIG" || true
+
+          # --------------------------------------------------------
+          # 强制设置 CONFIG_LSM
+          # --------------------------------------------------------
+          LSM_VALUE='landlock,lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard'
+
+          sed -i -E \
+            '/^CONFIG_LSM=.*/d;/^# CONFIG_LSM is not set$/d' \
+            "$CONFIG"
+
+          printf '%s\n' \
+            "CONFIG_LSM=\"${LSM_VALUE}\"" \
+            >> "$CONFIG"
+
+          # --------------------------------------------------------
+          # 再次确保关键配置没有被 Kconfig 改掉
+          # --------------------------------------------------------
+          sed -i -E \
+            '/^CONFIG_BBG=.*/d;/^# CONFIG_BBG is not set$/d' \
+            "$CONFIG"
+
+          printf '%s\n' \
+            'CONFIG_BBG=y' \
+            >> "$CONFIG"
+
+          sed -i -E \
+            '/^CONFIG_MQ_IOSCHED_SSG=.*/d;/^# CONFIG_MQ_IOSCHED_SSG is not set$/d' \
+            "$CONFIG"
+
+          printf '%s\n' \
+            'CONFIG_MQ_IOSCHED_SSG=y' \
+            >> "$CONFIG"
+
+          sed -i -E \
+            '/^CONFIG_MQ_IOSCHED_SSG_CGROUP=.*/d;/^# CONFIG_MQ_IOSCHED_SSG_CGROUP is not set$/d' \
+            "$CONFIG"
+
+          printf '%s\n' \
+            'CONFIG_MQ_IOSCHED_SSG_CGROUP=y' \
+            >> "$CONFIG"
 
           echo
-          echo "=== 关键配置 ==="
+          echo "========================================"
+          echo "写入后的关键配置"
+          echo "========================================"
+
+          grep -E \
+            '^(CONFIG_BBG|CONFIG_MQ_IOSCHED_SSG|CONFIG_MQ_IOSCHED_SSG_CGROUP|CONFIG_LSM)=' \
+            "$CONFIG"
+
+      # ============================================================
+      # 12. olddefconfig 同步
+      # ============================================================
+      - name: 同步并验证最终 Kconfig
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/kernel_workspace/common"
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM="$LLVM_VALUE" \
+            LLVM_IAS=1 \
+            olddefconfig
+
+          echo
+          echo "========================================"
+          echo "最终关键配置"
+          echo "========================================"
 
           grep -E \
             '^(CONFIG_BBG|CONFIG_MQ_IOSCHED_SSG|CONFIG_MQ_IOSCHED_SSG_CGROUP|CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_LZ4|CONFIG_ZSMALLOC)=' \
-            out/.config || true
+            out/.config \
+            || true
 
-          grep '^CONFIG_LSM=' out/.config || true
+          grep '^CONFIG_LSM=' \
+            out/.config
 
-          grep -q '^CONFIG_BBG=y$' out/.config
-          grep -q '^CONFIG_MQ_IOSCHED_SSG=y$' out/.config
-          grep -q '^CONFIG_MQ_IOSCHED_SSG_CGROUP=y$' out/.config
+          echo
+          echo "========================================"
+          echo "验证"
+          echo "========================================"
 
-          LSM_LINE="$(grep '^CONFIG_LSM=' out/.config || true)"
+          grep -q \
+            '^CONFIG_BBG=y$' \
+            out/.config
+
+          grep -q \
+            '^CONFIG_MQ_IOSCHED_SSG=y$' \
+            out/.config
+
+          grep -q \
+            '^CONFIG_MQ_IOSCHED_SSG_CGROUP=y$' \
+            out/.config
+
+          LSM_LINE="$(
+            grep '^CONFIG_LSM=' \
+              out/.config \
+              || true
+          )"
 
           case "$LSM_LINE" in
             *baseband_guard*)
@@ -401,27 +574,39 @@ jobs:
           esac
 
           echo
-          echo "gki_defconfig 验证通过。"
+          echo "最终 GKI 配置验证通过。"
 
-      - name: 编译 Image 和全部模块
+      # ============================================================
+      # 13. 云端编译 Image + modules
+      # ============================================================
+      - name: 云端编译 Image 和全部模块
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace/common"
 
-          echo "=== 编译器 ==="
-          "$CLANG_CMD" --version | head -n 1
-          "$LLD_CMD" --version | head -n 1
+          echo "========================================"
+          echo "编译器"
+          echo "========================================"
+
+          "$CLANG_CMD" \
+            --version \
+            | head -n 1
+
+          "$LLD_CMD" \
+            --version \
+            | head -n 1
 
           echo
-          echo "=== TOOLCHAIN ==="
           echo "LLVM=$LLVM_VALUE"
           echo "CLANG=$CLANG_CMD"
           echo "LLD=$LLD_CMD"
 
           echo
-          echo "=== 开始云端编译 Image + modules ==="
+          echo "========================================"
+          echo "开始云端编译"
+          echo "========================================"
 
           make \
             -j"$(nproc)" \
@@ -432,29 +617,49 @@ jobs:
             KCFLAGS="-Wno-error" \
             Image modules
 
-          test -f out/arch/arm64/boot/Image
-
           echo
-          echo "Image 编译成功："
-          ls -lh out/arch/arm64/boot/Image
+          echo "========================================"
+          echo "编译结果"
+          echo "========================================"
 
-          echo
-          echo "模块编译检查："
+          test -f \
+            out/arch/arm64/boot/Image
 
-          test -f out/Module.symvers
+          test -f \
+            out/Module.symvers
 
-          MODULE_COUNT="$(find out -type f -name '*.ko' | wc -l)"
+          ls -lh \
+            out/arch/arm64/boot/Image
+
+          MODULE_COUNT="$(
+            find out \
+              -type f \
+              -name '*.ko' \
+              | wc -l
+          )"
 
           echo "KO 数量：$MODULE_COUNT"
+
+          if [ "$MODULE_COUNT" -eq 0 ]; then
+            echo "错误：没有生成任何 .ko 模块。"
+            exit 1
+          fi
+
+          echo
+          echo "前 20 个模块："
 
           find out \
             -type f \
             -name '*.ko' \
-            | head -n 20 || true
+            | head -n 20 \
+            || true
 
           echo
           echo "Image + modules 云端编译验证通过。"
 
+      # ============================================================
+      # 14. 生成本地编译脚本
+      # ============================================================
       - name: 生成本地编译脚本
         shell: bash
         run: |
@@ -471,13 +676,20 @@ jobs:
           JOBS="${JOBS:-$(nproc)}"
 
           get_major() {
-            "$1" --version | sed -n '1s/^[^0-9]*\([0-9][0-9]*\).*/\1/p'
+            "$1" --version \
+              | sed -n '1s/^[^0-9]*\([0-9][0-9]*\).*/\1/p'
           }
 
-          if command -v clang-20 >/dev/null 2>&1 && command -v ld.lld-20 >/dev/null 2>&1; then
+          if command -v clang-20 >/dev/null 2>&1 &&
+             command -v ld.lld-20 >/dev/null 2>&1
+          then
             LLVM_VALUE='-20'
-          elif command -v clang >/dev/null 2>&1 && [ "$(get_major clang)" = '20' ]; then
+
+          elif command -v clang >/dev/null 2>&1 &&
+               [ "$(get_major clang)" = '20' ]
+          then
             LLVM_VALUE='1'
+
           else
             echo "错误：本机需要 Clang 20。"
             clang --version 2>/dev/null || true
@@ -508,40 +720,53 @@ jobs:
             KCFLAGS="-Wno-error" \
             Image modules
 
-          test -f "$OUT_DIR/arch/arm64/boot/Image"
+          test -f \
+            "$OUT_DIR/arch/arm64/boot/Image"
 
           echo
-          echo "编译完成：$OUT_DIR/arch/arm64/boot/Image"
+          echo "编译完成："
+          echo "$OUT_DIR/arch/arm64/boot/Image"
           SCRIPT
 
-          chmod +x build_local.sh
+          chmod +x \
+            build_local.sh
 
-      - name: 转换外部组件软链接为源码目录并清理
+      # ============================================================
+      # 15. 将 Baseband Guard 软链接转为真实目录
+      # ============================================================
+      - name: 转换外部组件软链接为源码目录
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          # Baseband Guard：
-          # setup.sh 创建的是外部仓库目录 + security 下软链接。
-          # 打包前转换为真正源码目录。
           if [ -L common/security/baseband-guard ]; then
-            rm -f common/security/baseband-guard
+            rm -f \
+              common/security/baseband-guard
           fi
 
           cp -a \
             common/Baseband-guard \
             common/security/baseband-guard
 
-          rm -rf common/Baseband-guard
+          rm -rf \
+            common/Baseband-guard
 
-          rm -rf common/security/baseband-guard/.git
+          rm -rf \
+            common/security/baseband-guard/.git
 
-          test -d common/security/baseband-guard
-          test -f common/security/baseband-guard/Kconfig
-          test -f common/security/baseband-guard/Makefile
-          test -f common/security/baseband-guard/baseband_guard.c
+          test -d \
+            common/security/baseband-guard
+
+          test -f \
+            common/security/baseband-guard/Kconfig
+
+          test -f \
+            common/security/baseband-guard/Makefile
+
+          test -f \
+            common/security/baseband-guard/baseband_guard.c
 
           if [ -L common/security/baseband-guard ]; then
             echo "错误：baseband-guard 仍为软链接。"
@@ -550,6 +775,9 @@ jobs:
 
           echo "Baseband Guard 已转换为完整源码目录。"
 
+      # ============================================================
+      # 16. 清理构建输出
+      # ============================================================
       - name: 清理编译输出和临时文件
         shell: bash
         run: |
@@ -557,11 +785,17 @@ jobs:
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          rm -rf assets
-          rm -rf common/out
+          rm -rf \
+            assets
+
+          rm -rf \
+            common/out
 
           echo "编译输出和临时文件清理完成。"
 
+      # ============================================================
+      # 17. SOURCE_INFO
+      # ============================================================
       - name: 生成源码说明
         shell: bash
         run: |
@@ -604,8 +838,9 @@ jobs:
           GitHub cloud build verification
           --------------------------------
           gki_defconfig : passed
-          Image          : passed
-          modules        : passed
+          CONFIG_LSM    : baseband_guard verified
+          Image         : passed
+          modules       : passed
 
           Local build
           -----------
@@ -620,6 +855,9 @@ jobs:
               make -j\$(nproc) O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 Image modules
           EOF
 
+      # ============================================================
+      # 18. 最终完整性检查
+      # ============================================================
       - name: 最终源码完整性检查
         shell: bash
         run: |
@@ -627,20 +865,44 @@ jobs:
 
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          test -f common/Makefile
-          test -f common/Kconfig
-          test -f common/arch/arm64/Kconfig
-          test -f common/arch/arm64/configs/gki_defconfig
+          echo "========================================"
+          echo "源码完整性检查"
+          echo "========================================"
 
-          test -f common/security/Kconfig
-          test -f common/security/baseband-guard/Kconfig
-          test -f common/security/baseband-guard/Makefile
-          test -f common/security/baseband-guard/baseband_guard.c
+          test -f \
+            common/Makefile
 
-          test -f common/lib/lz4/lz4armv8/lz4armv8.S
-          test -f common/build_local.sh
-          test -f common/SOURCE_INFO.txt
+          test -f \
+            common/Kconfig
 
+          test -f \
+            common/arch/arm64/Kconfig
+
+          test -f \
+            common/arch/arm64/configs/gki_defconfig
+
+          test -f \
+            common/security/Kconfig
+
+          test -f \
+            common/security/baseband-guard/Kconfig
+
+          test -f \
+            common/security/baseband-guard/Makefile
+
+          test -f \
+            common/security/baseband-guard/baseband_guard.c
+
+          test -f \
+            common/lib/lz4/lz4armv8/lz4armv8.S
+
+          test -f \
+            common/build_local.sh
+
+          test -f \
+            common/SOURCE_INFO.txt
+
+          # 不允许残留编译输出 / 工具链目录
           if find common \
             -type d \
             \( \
@@ -649,16 +911,25 @@ jobs:
               -o -name clang-r547379 \
               -o -name build-tools \
             \) \
-            -print -quit \
+            -print \
+            -quit \
             | grep -q .
           then
             echo "错误：源码包中存在不应包含的构建输出或工具链目录。"
             exit 1
           fi
 
+          # 不允许 Baseband Guard 保持软链接
+          if [ -L common/security/baseband-guard ]; then
+            echo "错误：baseband-guard 仍为软链接。"
+            exit 1
+          fi
+
+          # 输出仍然存在的其它软链接，但不将其视为错误
           if find common \
             -type l \
-            -print -quit \
+            -print \
+            -quit \
             | grep -q .
           then
             echo "发现源码树中的软链接："
@@ -667,8 +938,12 @@ jobs:
 
           du -sh common
 
+          echo
           echo "最终源码完整性检查通过。"
 
+      # ============================================================
+      # 19. 打包
+      # ============================================================
       - name: 打包完整源码
         shell: bash
         run: |
@@ -683,10 +958,22 @@ jobs:
             -cf "$ARCHIVE" \
             common
 
-          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          sha256sum \
+            "$ARCHIVE" \
+            > "$ARCHIVE.sha256"
 
-          echo "SOURCE_ARCHIVE=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE" >> "$GITHUB_ENV"
-          echo "SOURCE_SHA256=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE.sha256" >> "$GITHUB_ENV"
+          echo \
+            "SOURCE_ARCHIVE=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE" \
+            >> "$GITHUB_ENV"
+
+          echo \
+            "SOURCE_SHA256=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE.sha256" \
+            >> "$GITHUB_ENV"
+
+          echo
+          echo "========================================"
+          echo "源码包"
+          echo "========================================"
 
           ls -lh \
             "$ARCHIVE" \
@@ -695,6 +982,9 @@ jobs:
           echo
           cat "$ARCHIVE.sha256"
 
+      # ============================================================
+      # 20. 上传源码
+      # ============================================================
       - name: 上传完整源码
         uses: actions/upload-artifact@v7
         with:
@@ -703,6 +993,9 @@ jobs:
           archive: false
           if-no-files-found: error
 
+      # ============================================================
+      # 21. 上传 SHA256
+      # ============================================================
       - name: 上传 SHA256
         uses: actions/upload-artifact@v7
         with:
