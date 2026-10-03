@@ -1,4 +1,4 @@
-name: 6.1.141 内核源码下载
+name: 6.1.141 内核源码下载并编译验证
 
 env:
   TZ: Asia/Shanghai
@@ -9,128 +9,103 @@ env:
   KERNEL_REPO: 'cctv18/android_kernel_common_oneplus_sm8650'
   KERNEL_BRANCH: 'oneplus/sm8650_b_16.0.0_oneplus12_6.1.141'
 
+  KSU_TYPE: 'none'
+  SUSFS_ENABLE: 'false'
+  KPM_ENABLE: 'false'
+  LZ4_ENABLE: 'true'
+  LZ4KD_ENABLE: 'false'
+  BBR_ENABLE: 'false'
+  DROIDSPACES_ENABLE: 'false'
+  BETTER_NET_ENABLE: 'false'
+  SSG_ENABLE: 'true'
+  REKERNEL_ENABLE: 'false'
+  BASEBAND_GUARD_ENABLE: 'true'
+  KERNEL_SUFFIX: ''
+
 on:
   workflow_dispatch:
-    inputs:
-      ksu_type:
-        description: 'KernelSU分支(ReSukiSU/SukiSU Ultra/KernelSU Next/KSU(原版)/无内置KSU,默认ReSukiSU)'
-        required: true
-        type: choice
-        default: 'resukisu'
-        options:
-          - 'resukisu'
-          - 'sukisu'
-          - 'ksunext'
-          - 'ksu'
-          - 'none'
-      susfs_enable:
-        description: '是否开启susfs(需要已启用KernelSU)'
-        required: true
-        type: boolean
-        default: true
-      kpm_enable:
-        description: '是否保留KPM所需内核符号配置(不下载KPM工具; KPM仍在编译Image后处理)'
-        required: true
-        type: boolean
-        default: false
-      lz4_enable:
-        description: '是否安装 lz4 1.10.0+zstd 1.5.7 补丁'
-        required: true
-        type: boolean
-        default: true
-      lz4kd_enable:
-        description: '是否安装 LZ4KD 补丁(若已开启lz4+zstd补丁则可不开启)'
-        required: true
-        type: boolean
-        default: false
-      bbr_enable:
-        description: '是否启用bbr算法(false关闭,true加入算法,default设为默认)'
-        required: true
-        type: choice
-        default: 'false'
-        options:
-          - 'false'
-          - 'true'
-          - 'default'
-      droidspaces_enable:
-        description: '是否启用Droidspaces容器支持(false关闭,standard开启容器+ntsync,extend开启更多测试支持项)'
-        required: true
-        type: choice
-        default: 'false'
-        options:
-          - 'false'
-          - 'standard'
-          - 'extend'
-      better_net:
-        description: '是否开启网络功能拓展配置(ipset/iptables等)'
-        required: true
-        type: boolean
-        default: false
-      ssg_enable:
-        description: '是否启用三星SSG IO调度器支持'
-        required: true
-        type: boolean
-        default: true
-      rekernel_enable:
-        description: '是否启用Re-Kernel支持'
-        required: true
-        type: boolean
-        default: false
-      baseband_guard:
-        description: '是否开启内核级基带保护'
-        required: true
-        type: boolean
-        default: true
-      kernel_suffix:
-        description: '内核后缀(留空默认使用 KERNEL_NAME)'
-        required: false
-        type: string
-        default: ''
 
 jobs:
   source:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     steps:
-      - name: 初始化工作目录
+      - name: 安装编译依赖
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "$GITHUB_WORKSPACE/kernel_workspace"
-          mkdir -p "$GITHUB_WORKSPACE/kernel_workspace"
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-          echo "Kernel source repository: $KERNEL_REPO"
-          echo "Kernel source branch:     $KERNEL_BRANCH"
-          echo "Kernel version:           $KERNEL_VERSION.$SUB_VERSION"
-          echo "GitHub ref:               $GITHUB_REF"
 
-      - name: 下载并解压完整6.1.141内核源码
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc \
+            bison \
+            cpio \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lz4 \
+            python3 \
+            rsync \
+            zstd \
+            dwarves
+
+      - name: 准备LLVM 20
         shell: bash
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          if ! command -v clang-20 >/dev/null 2>&1; then
+            echo '错误：当前 GitHub Runner 没有 clang-20。'
+            clang --version || true
+            exit 1
+          fi
+
+          LLVM20_BIN="$(dirname "$(readlink -f "$(command -v clang-20)")")"
+
+          test -x "$LLVM20_BIN/clang"
+          test -x "$LLVM20_BIN/ld.lld"
+          test -x "$LLVM20_BIN/llvm-ar"
+          test -x "$LLVM20_BIN/llvm-nm"
+          test -x "$LLVM20_BIN/llvm-objcopy"
+
+          echo "LLVM20_BIN=$LLVM20_BIN" >> "$GITHUB_ENV"
+          echo "LLVM20_BIN=$LLVM20_BIN"
+          echo
+          "$LLVM20_BIN/clang" --version | head -n 2
+          "$LLVM20_BIN/ld.lld" --version | head -n 1
+
+      - name: 下载完整6.1.141内核源码
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE"
+          rm -rf kernel_workspace
+          mkdir -p kernel_workspace
+          cd kernel_workspace
 
           SRC_URL="https://github.com/${KERNEL_REPO}/archive/refs/heads/${KERNEL_BRANCH}.tar.gz"
-          echo "下载地址：$SRC_URL"
 
-          curl -fL --retry 5 --retry-delay 2 --connect-timeout 30 \
-            "$SRC_URL" -o kernel-source.tar.gz
+          curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            --connect-timeout 30 \
+            "$SRC_URL" \
+            -o kernel-source.tar.gz
 
           tar -xzf kernel-source.tar.gz
           rm -f kernel-source.tar.gz
 
-          SRC_DIR="$(find . -mindepth 1 -maxdepth 1 -type d -name 'android_kernel_common_oneplus_sm8650-*' -print -quit)"
-          if [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR" ]; then
-            echo "错误：没有找到解压后的内核源码目录。"
-            exit 1
-          fi
+          SRC_DIR="$(find . -mindepth 1 -maxdepth 1 -type d \
+            -name 'android_kernel_common_oneplus_sm8650-*' -print -quit)"
 
+          test -n "$SRC_DIR"
           mv "$SRC_DIR" common
 
-          # 基础完整性检查：必须包含能够进行arm64内核配置/编译的关键目录和文件。
           test -f common/Makefile
           test -f common/Kconfig
           test -f common/arch/arm64/Kconfig
@@ -144,694 +119,409 @@ jobs:
           test -d common/lib
           test -d common/mm
           test -d common/net
+          test -d common/security
           test -d common/scripts
 
-          echo "内核源码基础完整性检查通过。"
+          echo '完整内核源码基础检查通过。'
 
-      - name: 获取源码提交信息
+      - name: 获取源码提交SHA
         shell: bash
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          KERNEL_SHA="$(git ls-remote "https://github.com/${KERNEL_REPO}.git" "refs/heads/${KERNEL_BRANCH}" | awk 'NR==1 {print $1}')"
-          if [ -z "$KERNEL_SHA" ]; then
-            echo "错误：无法获取源码分支的提交SHA。"
-            exit 1
-          fi
+          KERNEL_SHA="$(
+            git ls-remote \
+              "https://github.com/${KERNEL_REPO}.git" \
+              "refs/heads/${KERNEL_BRANCH}" |
+            awk 'NR==1 {print $1}'
+          )"
 
+          test -n "$KERNEL_SHA"
           echo "KERNEL_SHA=$KERNEL_SHA" >> "$GITHUB_ENV"
-          echo "源码提交：$KERNEL_SHA"
+          echo "源码提交: $KERNEL_SHA"
 
-      - name: 配置 KernelSU
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          case "${{ inputs.ksu_type }}" in
-            resukisu|sukisu)
-              echo "正在配置 ReSukiSU..."
-              curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/refs/heads/main/kernel/setup.sh" | bash -s main
-              test -d KernelSU
-              test -d common/drivers/kernelsu
-              ;;
-
-            ksunext)
-              echo "正在配置 KernelSU Next..."
-              curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
-              test -d KernelSU-Next
-              test -d common/drivers/kernelsu
-              ;;
-
-            ksu)
-              echo "正在配置原版 KernelSU..."
-              curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
-              test -d KernelSU
-              test -d common/drivers/kernelsu
-              ;;
-
-            none)
-              echo "选择无内置KernelSU，跳过KernelSU源码注入。"
-              ;;
-          esac
-
-      - name: 应用 SUSFS
-        if: inputs.susfs_enable
+      - name: 应用LZ4 1.10.0 + Zstd 1.5.7
+        if: env.LZ4_ENABLE == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ "${{ inputs.ksu_type }}" = "none" ]; then
-            echo "错误：susfs_enable=true 时不能选择 ksu_type=none。"
-            exit 1
-          fi
-
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-          git clone --depth=1 \
-            -b "oki-${ANDROID_VERSION}-${KERNEL_VERSION}" \
-            https://github.com/cctv18/susfs4oki.git susfs4ksu
-
-          RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
-          curl -fL --retry 5 \
-            "$RAW_BASE/other_patch/69_hide_stuff.patch" \
-            -o common/69_hide_stuff.patch
-
-          cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch common/
-          cp susfs4ksu/kernel_patches/fs/* common/fs/
-          cp susfs4ksu/kernel_patches/include/linux/* common/include/linux/
-
-          cd common
-          patch -p1 --forward --batch \
-            < "50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch"
-          patch -p1 --forward --batch < 69_hide_stuff.patch
-
-          if [ "${{ inputs.ksu_type }}" = "ksu" ]; then
-            cp "../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" ../KernelSU/
-            cd ../KernelSU
-            patch -p1 --forward --batch < 10_enable_susfs_for_ksu.patch
-          fi
-
-      - name: 应用 LZ4 1.10.0 + Zstd 1.5.7
-        if: inputs.lz4_enable
-        shell: bash
-        run: |
-          set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
           RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
           mkdir -p assets/zram
 
-          curl -fL --retry 5 "$RAW_BASE/zram_patch/001-lz4.patch" \
+          curl -fL --retry 5 \
+            "$RAW_BASE/zram_patch/001-lz4.patch" \
             -o assets/zram/001-lz4.patch
-          curl -fL --retry 5 "$RAW_BASE/zram_patch/lz4armv8.S" \
+
+          curl -fL --retry 5 \
+            "$RAW_BASE/zram_patch/lz4armv8.S" \
             -o assets/zram/lz4armv8.S
-          curl -fL --retry 5 "$RAW_BASE/zram_patch/002-zstd.patch" \
+
+          curl -fL --retry 5 \
+            "$RAW_BASE/zram_patch/002-zstd.patch" \
             -o assets/zram/002-zstd.patch
 
-          # 001-lz4.patch 包含 lz4armv8.S 的 binary diff。
-          # 先按补丁要求放入最终路径，再让 git apply 排除这个 binary diff。
+          # 001-lz4.patch 含有 lz4armv8.S 的 binary diff。
+          # 先按补丁最终目录手工放置该文件，再让 git apply 排除 binary diff。
+          rm -rf common/lib/lz4/lz4armv8
           mkdir -p common/lib/lz4/lz4armv8
           cp assets/zram/lz4armv8.S common/lib/lz4/lz4armv8/lz4armv8.S
 
           cd common
-          git apply --exclude='lib/lz4/lz4armv8/lz4armv8.S' -p1 ../assets/zram/001-lz4.patch
-          git apply -p1 ../assets/zram/002-zstd.patch
+
+          git apply \
+            -p1 \
+            --exclude='lib/lz4/lz4armv8/lz4armv8.S' \
+            ../assets/zram/001-lz4.patch
+
+          git apply \
+            -p1 \
+            ../assets/zram/002-zstd.patch
 
           test -f lib/lz4/lz4armv8/lz4armv8.S
 
-      - name: 应用 LZ4KD
-        if: inputs.lz4kd_enable
+          echo 'LZ4 + Zstd 补丁应用完成。'
+
+      - name: 启用SSG IO调度器
+        if: env.SSG_ENABLE == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          if [ ! -d SukiSU_patch ]; then
-            git clone --depth=1 https://github.com/ShirkNeko/SukiSU_patch.git SukiSU_patch
-          fi
-
-          cp -r SukiSU_patch/other/zram/lz4k/include/linux/* common/include/linux/
-          cp -r SukiSU_patch/other/zram/lz4k/lib/* common/lib/
-          cp -r SukiSU_patch/other/zram/lz4k/crypto/* common/crypto/
-          cp "SukiSU_patch/other/zram/zram_patch/${KERNEL_VERSION}/lz4kd.patch" assets/lz4kd.patch
-
-          cd common
-          patch -p1 -F 3 --forward --batch < ../assets/lz4kd.patch
-
-      - name: 配置 SUSFS 与通用内核选项
-        shell: bash
-        run: |
-          set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
 
           set_config() {
             local key="$1"
             local value="$2"
-            sed -i -E "/^${key}=.*/d;/^# ${key} is not set$/d" "$DEFCONFIG"
+
+            sed -i -E \
+              "/^${key}=.*/d;/^# ${key} is not set$/d" \
+              "$DEFCONFIG"
+
             printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
           }
 
-          if [ "${{ inputs.ksu_type }}" != "none" ]; then
-            set_config CONFIG_KSU y
-          else
-            set_config CONFIG_KSU n
-          fi
+          set_config CONFIG_MQ_IOSCHED_SSG y
+          set_config CONFIG_MQ_IOSCHED_SSG_CGROUP y
 
-          if [ "${{ inputs.susfs_enable }}" = "true" ] && [ "${{ inputs.ksu_type }}" != "none" ]; then
-            set_config CONFIG_KSU_SUSFS y
-            set_config CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT y
-            set_config CONFIG_KSU_SUSFS_SUS_PATH y
-            set_config CONFIG_KSU_SUSFS_SUS_MOUNT y
-            set_config CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT y
-            set_config CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT y
-            set_config CONFIG_KSU_SUSFS_SUS_KSTAT y
-            set_config CONFIG_KSU_SUSFS_TRY_UMOUNT y
-            set_config CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT y
-            set_config CONFIG_KSU_SUSFS_SPOOF_UNAME y
-            set_config CONFIG_KSU_SUSFS_ENABLE_LOG y
-            set_config CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS y
-            set_config CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG y
-            set_config CONFIG_KSU_SUSFS_OPEN_REDIRECT y
-            set_config CONFIG_KSU_SUSFS_SUS_MAP y
-          else
-            set_config CONFIG_KSU_SUSFS n
-          fi
-
-          # Mountify/挂载能力
-          set_config CONFIG_TMPFS_XATTR y
-          set_config CONFIG_TMPFS_POSIX_ACL y
-
-          # LZ4KD 所需配置
-          if [ "${{ inputs.lz4kd_enable }}" = "true" ]; then
-            set_config CONFIG_ZSMALLOC y
-            set_config CONFIG_CRYPTO_LZ4HC y
-            set_config CONFIG_CRYPTO_LZ4K y
-            set_config CONFIG_CRYPTO_LZ4KD y
-            set_config CONFIG_CRYPTO_842 y
-          fi
-
-          # O2 性能优化及关闭 UAPI 头文件安装
-          set_config CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE y
-          set_config CONFIG_HEADERS_INSTALL n
-
-          # 去掉 build.config.gki 中的 check_defconfig 调用，便于直接使用修改后的配置。
-          sed -i 's/check_defconfig//' common/build.config.gki
-
-      - name: 配置 BBR / 拥塞控制算法
+      - name: 集成Baseband Guard
+        if: env.BASEBAND_GUARD_ENABLE == 'true'
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
+
+          git clone --depth=1 \
+            https://github.com/cctv18/Baseband-guard.git \
+            Baseband-guard
+
+          test -f Baseband-guard/Kconfig
+          test -f Baseband-guard/Makefile
+          test -f Baseband-guard/baseband_guard.c
+
+          SECURITY_DIR="common/security"
+          BBG_SRC="$PWD/Baseband-guard"
+          BBG_DST="$SECURITY_DIR/baseband-guard"
+
+          # setup.sh 的作用在这里显式完成，避免最终源码产生指向包外部的软链接。
+          if ! grep -q 'baseband-guard/baseband_guard.o' "$SECURITY_DIR/Makefile"; then
+            printf '\nobj-$(CONFIG_BBG) += baseband-guard/\n' >> "$SECURITY_DIR/Makefile"
+          fi
+
+          if ! grep -q 'security/baseband-guard/Kconfig' "$SECURITY_DIR/Kconfig"; then
+            awk '
+              { a[NR]=$0 }
+              END {
+                last=0
+                for (i=1; i<=NR; i++) {
+                  if (a[i] ~ /^endmenu[[:space:]]*$/) last=i
+                }
+                if (last == 0) {
+                  for (i=1; i<=NR; i++) print a[i]
+                  print "source \\\"security/baseband-guard/Kconfig\\\""
+                } else {
+                  for (i=1; i<=NR; i++) {
+                    if (i == last) print "source \\\"security/baseband-guard/Kconfig\\\""
+                    print a[i]
+                  }
+                }
+              }
+            ' "$SECURITY_DIR/Kconfig" > "$SECURITY_DIR/Kconfig.tmp"
+            mv "$SECURITY_DIR/Kconfig.tmp" "$SECURITY_DIR/Kconfig"
+          fi
+
+          # 复制完整 Baseband Guard 源码到最终源码树内部。
+          rm -rf "$BBG_DST"
+          mkdir -p "$BBG_DST"
+          cp -a "$BBG_SRC"/. "$BBG_DST"/
+          rm -rf "$BBG_DST/.git"
+
+          # modern LSM / GKI 直接在默认 LSM 列表中加入 baseband_guard。
+          sed -i \
+            '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' \
+            "$SECURITY_DIR/Kconfig"
+
+          rm -rf Baseband-guard
+
           DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
 
           set_config() {
             local key="$1"
             local value="$2"
-            sed -i -E "/^${key}=.*/d;/^# ${key} is not set$/d" "$DEFCONFIG"
-            printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
-          }
 
-          case "${{ inputs.bbr_enable }}" in
-            false)
-              echo "BBR相关配置保持源码默认状态。"
-              ;;
-            true|default)
-              set_config CONFIG_TCP_CONG_ADVANCED y
-              set_config CONFIG_TCP_CONG_BBR y
-              set_config CONFIG_TCP_CONG_CUBIC y
-              set_config CONFIG_TCP_CONG_VEGAS y
-              set_config CONFIG_TCP_CONG_NV y
-              set_config CONFIG_TCP_CONG_WESTWOOD y
-              set_config CONFIG_TCP_CONG_HTCP y
-              set_config CONFIG_TCP_CONG_BRUTAL y
-              if [ "${{ inputs.bbr_enable }}" = "default" ]; then
-                set_config CONFIG_DEFAULT_TCP_CONG bbr
-              else
-                set_config CONFIG_DEFAULT_TCP_CONG cubic
-              fi
-              ;;
-          esac
+            sed -i -E \
+              "/^${key}=.*/d;/^# ${key} is not set$/d" \
+              "$DEFCONFIG"
 
-      - name: 配置网络功能增强
-        if: inputs.better_net
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-          DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
-
-          set_config() {
-            local key="$1"
-            local value="$2"
-            sed -i -E "/^${key}=.*/d;/^# ${key} is not set$/d" "$DEFCONFIG"
-            printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
-          }
-
-          set_config CONFIG_BPF_STREAM_PARSER y
-          set_config CONFIG_NETFILTER_XT_MATCH_ADDRTYPE y
-          set_config CONFIG_NETFILTER_XT_SET y
-          set_config CONFIG_IP_SET y
-          set_config CONFIG_IP_SET_MAX 65534
-          set_config CONFIG_IP_SET_BITMAP_IP y
-          set_config CONFIG_IP_SET_BITMAP_IPMAC y
-          set_config CONFIG_IP_SET_BITMAP_PORT y
-          set_config CONFIG_IP_SET_HASH_IP y
-          set_config CONFIG_IP_SET_HASH_IPMARK y
-          set_config CONFIG_IP_SET_HASH_IPPORT y
-          set_config CONFIG_IP_SET_HASH_IPPORTIP y
-          set_config CONFIG_IP_SET_HASH_IPPORTNET y
-          set_config CONFIG_IP_SET_HASH_IPMAC y
-          set_config CONFIG_IP_SET_HASH_MAC y
-          set_config CONFIG_IP_SET_HASH_NETPORTNET y
-          set_config CONFIG_IP_SET_HASH_NET y
-          set_config CONFIG_IP_SET_HASH_NETNET y
-          set_config CONFIG_IP_SET_HASH_NETPORT y
-          set_config CONFIG_IP_SET_HASH_NETIFACE y
-          set_config CONFIG_IP_SET_LIST_SET y
-          set_config CONFIG_IP6_NF_NAT y
-          set_config CONFIG_IP6_NF_TARGET_MASQUERADE y
-
-          RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
-          mkdir -p assets/network
-          curl -fL --retry 5 "$RAW_BASE/other_patch/config.patch" \
-            -o assets/network/config.patch
-
-          cd common
-          patch -p1 -F 3 --forward --batch < ../assets/network/config.patch
-
-      - name: 配置 Droidspaces
-        if: inputs.droidspaces_enable != 'false'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
-          mkdir -p assets/droidspaces
-
-          for p in \
-            fix_sysvipc_kabi_6_7_8.patch \
-            fix_oplus_bsp_midas.patch \
-            ntsync_base.patch \
-            "ntsync_compat_${ANDROID_VERSION}-${KERNEL_VERSION}.patch"; do
-            curl -fL --retry 5 "$RAW_BASE/droidspaces_patch/$p" \
-              -o "assets/droidspaces/$p"
-          done
-
-          if [ "${{ inputs.droidspaces_enable }}" = "extend" ]; then
-            curl -fL --retry 5 "$RAW_BASE/droidspaces_patch/evdi_drm.patch" \
-              -o assets/droidspaces/evdi_drm.patch
-          fi
-
-          cd common
-          patch -p1 -F 3 --forward --batch < ../assets/droidspaces/fix_sysvipc_kabi_6_7_8.patch
-          patch -p1 -F 3 --forward --batch < ../assets/droidspaces/fix_oplus_bsp_midas.patch
-          patch -p1 -F 3 --forward --batch < ../assets/droidspaces/ntsync_base.patch
-          patch -p1 -F 3 --forward --batch < "../assets/droidspaces/ntsync_compat_${ANDROID_VERSION}-${KERNEL_VERSION}.patch"
-
-          DEFCONFIG="arch/arm64/configs/gki_defconfig"
-          set_config() {
-            local key="$1"
-            local value="$2"
-            sed -i -E "/^${key}=.*/d;/^# ${key} is not set$/d" "$DEFCONFIG"
-            printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
-          }
-
-          set_config CONFIG_PID_NS y
-          set_config CONFIG_IPC_NS y
-          set_config CONFIG_USER_NS y
-          set_config CONFIG_SYSVIPC y
-          set_config CONFIG_DEVTMPFS y
-          set_config CONFIG_NAMESPACES y
-          set_config CONFIG_POSIX_MQUEUE y
-          set_config CONFIG_NETFILTER_XT_MATCH_ADDRTYPE y
-          set_config CONFIG_NETFILTER_XT_TARGET_LOG y
-          set_config CONFIG_NETFILTER_XT_MATCH_RECENT y
-          set_config CONFIG_NTSYNC y
-
-          if [ "${{ inputs.droidspaces_enable }}" = "extend" ]; then
-            patch -p1 -F 3 --forward --batch < ../assets/droidspaces/evdi_drm.patch
-            set_config CONFIG_BT_HCIVHCI y
-            set_config CONFIG_STATIC_USERMODEHELPER n
-            set_config CONFIG_DRM_LINDROID_EVDI y
-          fi
-
-      - name: 配置 SSG IO 调度器
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-          DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
-
-          set_config() {
-            local key="$1"
-            local value="$2"
-            sed -i -E "/^${key}=.*/d;/^# ${key} is not set$/d" "$DEFCONFIG"
-            printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
-          }
-
-          if [ "${{ inputs.ssg_enable }}" = "true" ]; then
-            set_config CONFIG_MQ_IOSCHED_SSG y
-            set_config CONFIG_MQ_IOSCHED_SSG_CGROUP y
-          else
-            set_config CONFIG_MQ_IOSCHED_SSG n
-            set_config CONFIG_MQ_IOSCHED_SSG_CGROUP n
-          fi
-
-      - name: 配置 Re-Kernel
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-          DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
-
-          set_config() {
-            local key="$1"
-            local value="$2"
-            sed -i -E "/^${key}=.*/d;/^# ${key} is not set$/d" "$DEFCONFIG"
-            printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
-          }
-
-          if [ "${{ inputs.rekernel_enable }}" = "true" ]; then
-            set_config CONFIG_REKERNEL y
-          else
-            set_config CONFIG_REKERNEL n
-          fi
-
-      - name: 配置基带保护
-        if: inputs.baseband_guard
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-          DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
-          RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
-
-          set_config() {
-            local key="$1"
-            local value="$2"
-            sed -i -E "/^${key}=.*/d;/^# ${key} is not set$/d" "$DEFCONFIG"
             printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
           }
 
           set_config CONFIG_BBG y
 
-          # 执行 Baseband-guard 的源码初始化脚本。
-          curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
+          test -d common/security/baseband-guard
+          test -f common/security/baseband-guard/Kconfig
+          test -f common/security/baseband-guard/Makefile
+          test -f common/security/baseband-guard/baseband_guard.c
+          grep -q 'security/baseband-guard/Kconfig' common/security/Kconfig
+          grep -q 'obj-$(CONFIG_BBG) += baseband-guard/' common/security/Makefile
 
-          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' common/security/Kconfig
+          echo 'Baseband Guard 集成完成。'
 
-      - name: 关闭基带保护时显式设为n
-        if: inputs.baseband_guard == false
+      - name: 固定内核配置
         shell: bash
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-          DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
-          sed -i -E '/^CONFIG_BBG=.*/d;/^# CONFIG_BBG is not set$/d' "$DEFCONFIG"
-          echo 'CONFIG_BBG=n' >> "$DEFCONFIG"
 
-      - name: 应用基础CVE补丁
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
-          mkdir -p assets/base
-          curl -fL --retry 5 \
-            "$RAW_BASE/other_patch/cve-2026-43499-rtmutex-6.1.patch" \
-            -o assets/base/cve-2026-43499-rtmutex-6.1.patch
-
-          cd common
-          patch -p1 -F 3 --forward --batch \
-            < ../assets/base/cve-2026-43499-rtmutex-6.1.patch
-
-      - name: 配置 KPM 所需内核符号
-        if: inputs.kpm_enable
-        shell: bash
-        run: |
-          set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace"
           DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
 
           set_config() {
             local key="$1"
             local value="$2"
-            sed -i -E "/^${key}=.*/d;/^# ${key} is not set$/d" "$DEFCONFIG"
+
+            sed -i -E \
+              "/^${key}=.*/d;/^# ${key} is not set$/d" \
+              "$DEFCONFIG"
+
             printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
           }
 
-          # KPatch-Next工作在已编译的arm64内核Image上，这里只准备源码编译阶段所需符号。
-          set_config CONFIG_KALLSYMS y
-          set_config CONFIG_KALLSYMS_ALL y
+          # KernelSU：关闭，不下载/注入任何KSU源码
+          set_config CONFIG_KSU n
+          set_config CONFIG_KSU_SUSFS n
 
-      - name: 设置本地编译版本后缀
+          # KPM：关闭
+          # 不添加 KPM 特有配置。
+
+          # LZ4KD：关闭
+          set_config CONFIG_CRYPTO_LZ4K n
+          set_config CONFIG_CRYPTO_LZ4KD n
+
+          # BBR / Better Net / Droidspaces / Re-Kernel：关闭
+          # 不添加对应功能配置。
+
+          # SSG：固定开启
+          set_config CONFIG_MQ_IOSCHED_SSG y
+          set_config CONFIG_MQ_IOSCHED_SSG_CGROUP y
+
+          # Baseband Guard：固定开启
+          set_config CONFIG_BBG y
+
+          # 已使用的通用配置
+          set_config CONFIG_TMPFS_XATTR y
+          set_config CONFIG_TMPFS_POSIX_ACL y
+          set_config CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE y
+          set_config CONFIG_HEADERS_INSTALL n
+
+          sed -i 's/check_defconfig//' common/build.config.gki
+
+          # 固定版本后缀
+          set_config CONFIG_LOCALVERSION '"-'"$KERNEL_NAME"'"'
+
+      - name: 最终源码树检查
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
-          DEFCONFIG="common/arch/arm64/configs/gki_defconfig"
 
-          set_config() {
-            local key="$1"
-            local value="$2"
-            sed -i -E "/^${key}=.*/d;/^# ${key} is not set$/d" "$DEFCONFIG"
-            printf '%s\n' "${key}=${value}" >> "$DEFCONFIG"
-          }
+          test ! -e common/drivers/kernelsu
+          test ! -d KernelSU
+          test ! -d KernelSU-Next
 
-          if [ -n "${{ inputs.kernel_suffix }}" ]; then
-            set_config CONFIG_LOCALVERSION '"-${{ inputs.kernel_suffix }}"'
-          else
-            set_config CONFIG_LOCALVERSION '"-'"$KERNEL_NAME"'"'
+          if [ "$LZ4_ENABLE" = 'true' ]; then
+            test -f common/lib/lz4/lz4armv8/lz4armv8.S
           fi
 
-      - name: KernelSU Next补充兼容补丁
-        if: inputs.ksu_type == 'ksunext'
+          if [ "$BASEBAND_GUARD_ENABLE" = 'true' ]; then
+            test -d common/security/baseband-guard
+            test -f common/security/baseband-guard/Kconfig
+            test -f common/security/baseband-guard/baseband_guard.c
+          fi
+
+          while IFS= read -r -d '' link; do
+            target="$(readlink "$link")"
+            resolved="$(realpath -m "$(dirname "$link")/$target")"
+
+            case "$resolved" in
+              "$GITHUB_WORKSPACE/kernel_workspace/common"/*)
+                ;;
+              *)
+                echo "错误：common中发现指向源码树外部的软链接：$link -> $target"
+                exit 1
+                ;;
+            esac
+          done < <(find common -type l -print0)
+
+          echo '最终源码树检查通过。'
+
+      - name: 生成最终Kconfig
         shell: bash
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}"
-          mkdir -p assets
-          curl -fL --retry 5 "$RAW_BASE/other_patch/apk_sign.patch" \
-            -o assets/apk_sign.patch
-
-          cd common/drivers/kernelsu
-          patch -p2 -F 3 --forward --batch < ../../../assets/apk_sign.patch
-
-      - name: 清理补丁仓库与构建缓存，保留完整源码
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          # 这些只是补丁来源/临时文件，不属于最终内核源码本体。
-          rm -rf susfs4ksu SukiSU_patch assets
-          # KernelSU/ReSukiSU 与 KernelSU-Next 的 kernelsu 目录由软链接指向这些目录，必须保留其源码。
-          # 仅删除 Git 元数据，避免把完整 Git 历史塞进最终源码包。
-          rm -rf KernelSU/.git KernelSU-Next/.git
-          rm -f common/69_hide_stuff.patch
-          rm -f common/50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch
-
-          # 删除可能由Kconfig检查产生的临时输出，最终包只保留源码。
-          rm -rf common/out
-
-      - name: Kconfig本地编译前验证
-        shell: bash
-        run: |
-          set -euo pipefail
           cd "$GITHUB_WORKSPACE/kernel_workspace/common"
+          export PATH="$LLVM20_BIN:$PATH"
 
-          echo "开始执行arm64 gki_defconfig验证。"
-          make O=out ARCH=arm64 gki_defconfig
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            KCFLAGS=-Wno-error \
+            gki_defconfig
+
           test -f out/.config
           grep -q '^CONFIG_ARM64=y$' out/.config
+          grep -q '^CONFIG_MQ_IOSCHED_SSG=y$' out/.config
+          grep -q '^CONFIG_MQ_IOSCHED_SSG_CGROUP=y$' out/.config
+          grep -q '^CONFIG_BBG=y$' out/.config
+          grep -q '^# CONFIG_KSU is not set$' out/.config || grep -q '^CONFIG_KSU=n$' out/.config
 
-          rm -rf out
-          echo "gki_defconfig验证通过。"
+          echo 'gki_defconfig 成功。'
 
-      - name: 生成本地编译脚本和源码说明
+      - name: 实际编译Image验证
         shell: bash
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
 
-          cat > common/build_local.sh <<'SCRIPT'
-          #!/usr/bin/env bash
+          cd "$GITHUB_WORKSPACE/kernel_workspace/common"
+          export PATH="$LLVM20_BIN:$PATH"
+
+          echo '开始编译6.1.141 arm64 Image。'
+
+          make \
+            -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            KCFLAGS=-Wno-error \
+            Image
+
+          test -f out/arch/arm64/boot/Image
+          test -s out/arch/arm64/boot/Image
+
+          echo 'Image 编译成功。'
+          ls -lh out/arch/arm64/boot/Image
+
+      - name: 写入源码包说明
+        shell: bash
+        run: |
           set -euo pipefail
 
-          ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-          OUT_DIR="${OUT_DIR:-$ROOT_DIR/out}"
-          JOBS="${JOBS:-$(nproc)}"
+          cd "$GITHUB_WORKSPACE/kernel_workspace/common"
 
-          # 不在这里下载任何工具链。
-          # 使用方式：
-          #   LLVM=/path/to/clang/bin/ ./build_local.sh
-          # 或：
-          #   export LLVM=/path/to/clang/bin/
-          #   ./build_local.sh
-          #
-          # LLVM 必须指向包含 clang / ld.lld / llvm-ar / llvm-nm / llvm-objcopy 等工具的目录，
-          # 或者令其为空并直接使用系统 PATH 中的 LLVM 工具。
-          if [ -n "${LLVM:-}" ]; then
-            case "$LLVM" in
-              */) ;;
-              *) LLVM="$LLVM/" ;;
-            esac
-            export PATH="${LLVM%/}:$PATH"
-          fi
-
-          export ARCH="${ARCH:-arm64}"
-          export CROSS_COMPILE="${CROSS_COMPILE:-}"
-
-          cd "$ROOT_DIR"
-
-          echo "== Kernel local build =="
-          echo "ARCH=$ARCH"
-          echo "CROSS_COMPILE=${CROSS_COMPILE:-<LLVM integrated tools>}"
-          echo "LLVM=${LLVM:-<PATH>}"
-          echo "OUT_DIR=$OUT_DIR"
-          echo "JOBS=$JOBS"
-
-          make O="$OUT_DIR" ARCH="$ARCH" LLVM=1 CROSS_COMPILE="$CROSS_COMPILE" gki_defconfig
-          make -j"$JOBS" O="$OUT_DIR" ARCH="$ARCH" LLVM=1 CROSS_COMPILE="$CROSS_COMPILE" Image
-
-          echo
-          echo "Image: $OUT_DIR/arch/arm64/boot/Image"
-          test -f "$OUT_DIR/arch/arm64/boot/Image"
-          echo "Kernel Image build completed."
-          SCRIPT
-          chmod +x common/build_local.sh
-
-          SELECTED_KSU="${{ inputs.ksu_type }}"
-          SELECTED_SUSFS="${{ inputs.susfs_enable }}"
-          SELECTED_KPM="${{ inputs.kpm_enable }}"
-          SELECTED_LZ4="${{ inputs.lz4_enable }}"
-          SELECTED_LZ4KD="${{ inputs.lz4kd_enable }}"
-          SELECTED_BBR="${{ inputs.bbr_enable }}"
-          SELECTED_DROIDSPACES="${{ inputs.droidspaces_enable }}"
-          SELECTED_NET="${{ inputs.better_net }}"
-          SELECTED_SSG="${{ inputs.ssg_enable }}"
-          SELECTED_REKERNEL="${{ inputs.rekernel_enable }}"
-          SELECTED_BBG="${{ inputs.baseband_guard }}"
-          SELECTED_SUFFIX="${{ inputs.kernel_suffix }}"
-
-          cat > common/SOURCE_INFO.txt <<EOF
+          cat > SOURCE_INFO.txt <<EOF
           Kernel source package
           =====================
 
           Kernel version : ${KERNEL_VERSION}.${SUB_VERSION}
           Android        : ${ANDROID_VERSION}
-          Source repo    : https://github.com/${KERNEL_REPO}
-          Source branch  : ${KERNEL_BRANCH}
-          Source commit  : ${KERNEL_SHA}
-          Generated by   : ${GITHUB_REPOSITORY}
-          Workflow run   : ${GITHUB_RUN_ID}
-          Generated time  : $(TZ="$TZ" date '+%Y-%m-%d %H:%M:%S %Z')
+          Repository      : https://github.com/${KERNEL_REPO}
+          Branch          : ${KERNEL_BRANCH}
+          Commit          : ${KERNEL_SHA}
+          Generated       : $(TZ="$TZ" date '+%Y-%m-%d %H:%M:%S %Z')
 
-          Selected components
-          -------------------
-          KernelSU       : ${SELECTED_KSU}
-          SUSFS          : ${SELECTED_SUSFS}
-          KPM symbols    : ${SELECTED_KPM}
-          LZ4+Zstd       : ${SELECTED_LZ4}
-          LZ4KD          : ${SELECTED_LZ4KD}
-          BBR mode       : ${SELECTED_BBR}
-          Droidspaces    : ${SELECTED_DROIDSPACES}
-          Better Net     : ${SELECTED_NET}
-          SSG             : ${SELECTED_SSG}
-          Re-Kernel      : ${SELECTED_REKERNEL}
-          Baseband Guard  : ${SELECTED_BBG}
-          Local version   : ${SELECTED_SUFFIX:-$KERNEL_NAME}
+          Fixed components
+          ----------------
+          KernelSU        : disabled
+          SUSFS           : disabled
+          KPM             : disabled
+          LZ4+Zstd        : enabled
+          LZ4KD           : disabled
+          BBR             : disabled
+          Droidspaces     : disabled
+          Better Net      : disabled
+          SSG             : enabled
+          Re-Kernel       : disabled
+          Baseband Guard  : enabled
+
+          Build verification
+          ------------------
+          gki_defconfig   : PASS
+          Image           : PASS
+          Image           : out/arch/arm64/boot/Image
 
           Toolchain
           ---------
-          No Clang/LLVM package is included.
-          No build-tools package is included.
-          No ccache binary/cache is included.
-          The local compiler/toolchain must be supplied separately.
+          GitHub Actions runner: ubuntu-26.04
+          Clang: runner-provided Clang 20
+          No downloaded LLVM/Clang archive is included.
+          No build-tools archive is included.
+          No ccache cache is included.
 
-          Build
-          -----
-          This package contains the complete kernel source tree used by the
-          original Action's `make ... ARCH=arm64 ... Image` build path.
-
-          Run:
-              ./build_local.sh
-
-          Or specify an external Android LLVM/Clang installation:
-              LLVM=/path/to/clang/bin ./build_local.sh
-
-          KPM note
-          --------
-          KPM is applied to the compiled kernel Image rather than to the source tree.
-          This source package therefore does not embed KPatch-Next binaries.
-          When KPM is enabled, CONFIG_KALLSYMS and CONFIG_KALLSYMS_ALL are
-          enabled so the resulting Image can be processed by KPatch-Next later.
+          Local build
+          -----------
+          A clean local build needs an arm64-compatible LLVM/Clang 20 toolchain
+          and the normal Linux kernel host build dependencies.
           EOF
 
-      - name: 再次检查最终源码完整性
+      - name: 删除编译输出并打包源码
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$GITHUB_WORKSPACE/kernel_workspace"
 
+          rm -rf common/out
+
+          test ! -d common/out
+          test -f common/SOURCE_INFO.txt
           test -f common/Makefile
           test -f common/Kconfig
-          test -f common/arch/arm64/Kconfig
           test -f common/arch/arm64/configs/gki_defconfig
-          test -f common/build_local.sh
-          test -f common/SOURCE_INFO.txt
 
-          # 最终包不允许包含编译输出和工具链目录。
-          if find common -type d \( -name out -o -name clang20 -o -name build-tools \) -print -quit | grep -q .; then
-            echo "错误：最终源码目录包含不应打包的构建输出/工具链目录。"
-            exit 1
-          fi
+          ARCHIVE="android_kernel_common_sm8650_${KERNEL_VERSION}.${SUB_VERSION}_${KERNEL_NAME}.tar.zst"
 
-          echo "最终源码完整性检查通过。"
-          du -sh common
+          tar \
+            --zstd \
+            -cf "$ARCHIVE" \
+            common
 
-      - name: 打包完整内核源码
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/kernel_workspace"
-
-          if [ -n "${{ inputs.kernel_suffix }}" ]; then
-            suffix="${{ inputs.kernel_suffix }}"
-          else
-            suffix="$KERNEL_NAME"
-          fi
-
-          ARCHIVE="android_kernel_common_sm8650_${KERNEL_VERSION}.${SUB_VERSION}_${suffix}.tar.zst"
-
-          # 不包含 Git 历史；源码、Kconfig、Makefile、脚本、配置及已选组件修改全部保留。
-          tar --zstd -cf "$ARCHIVE" common
           sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-          echo "SOURCE_ARCHIVE=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE" >> "$GITHUB_ENV"
-          echo "SOURCE_SHA256=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE.sha256" >> "$GITHUB_ENV"
+          echo "ARCHIVE=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE" >> "$GITHUB_ENV"
+          echo "CHECKSUM=$GITHUB_WORKSPACE/kernel_workspace/$ARCHIVE.sha256" >> "$GITHUB_ENV"
 
           ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
 
-      - name: 上传完整内核源码包
+      - name: 上传内核源码包
         uses: actions/upload-artifact@v7
         with:
-          name: kernel-source-${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}-${{ github.run_number }}
-          path: ${{ env.SOURCE_ARCHIVE }}
+          name: kernel-source-6.1.141-${{ github.run_number }}
+          path: ${{ env.ARCHIVE }}
           archive: false
           if-no-files-found: error
 
-      - name: 上传源码包SHA256
+      - name: 上传SHA256校验文件
         uses: actions/upload-artifact@v7
         with:
-          name: kernel-source-sha256-${{ env.KERNEL_VERSION }}.${{ env.SUB_VERSION }}-${{ github.run_number }}
-          path: ${{ env.SOURCE_SHA256 }}
+          name: kernel-source-sha256-6.1.141-${{ github.run_number }}
+          path: ${{ env.CHECKSUM }}
           archive: false
           if-no-files-found: error
