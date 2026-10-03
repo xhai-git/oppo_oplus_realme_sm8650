@@ -269,17 +269,37 @@ jobs:
             -o /tmp/baseband-guard-setup.sh
 
           chmod +x /tmp/baseband-guard-setup.sh
-
           /tmp/baseband-guard-setup.sh
 
           DEFCONFIG="arch/arm64/configs/gki_defconfig"
 
+          # 启用 Baseband Guard
           sed -i -E \
             '/^CONFIG_BBG=.*/d;/^# CONFIG_BBG is not set$/d' \
             "$DEFCONFIG"
 
           printf '%s\n' 'CONFIG_BBG=y' >> "$DEFCONFIG"
 
+          if grep -q '^CONFIG_LSM=' "$DEFCONFIG"; then
+            sed -i \
+              's/^CONFIG_LSM="\([^"]*\)"/CONFIG_LSM="\1,baseband_guard"/' \
+              "$DEFCONFIG"
+          else
+            printf '%s\n' \
+              'CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,integrity,selinux,smack,tomoyo,apparmor,bpf,baseband_guard"' \
+              >> "$DEFCONFIG"
+          fi
+
+          # 防止重复加入
+          sed -i \
+            's/,baseband_guard,baseband_guard/,baseband_guard/g' \
+            "$DEFCONFIG"
+
+          echo "=== Baseband Guard 配置 ==="
+          grep '^CONFIG_BBG=' "$DEFCONFIG"
+          grep '^CONFIG_LSM=' "$DEFCONFIG"
+
+          # 源码接入检查
           grep -Fq \
             'source "security/baseband-guard/Kconfig"' \
             security/Kconfig
